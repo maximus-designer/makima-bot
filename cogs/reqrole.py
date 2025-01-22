@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 EMBED_COLOR = 0x2f2136  # Constant embed color
 
-
 class RoleManagement(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -31,10 +30,6 @@ class RoleManagement(commands.Cog):
                 self.role_assignment_limit = data.get("role_assignment_limit", 5)  # Set limit if provided
         except FileNotFoundError:
             logger.info("No existing role mappings file found. Starting fresh.")
-        except json.JSONDecodeError as e:
-            logger.error(f"Error loading JSON data: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
 
     def save_data(self):
         """Save role mappings to a file."""
@@ -44,11 +39,8 @@ class RoleManagement(commands.Cog):
             "log_channel_id": self.log_channel_id,
             "role_assignment_limit": self.role_assignment_limit  # Save role assignment limit
         }
-        try:
-            with open("role_mappings.json", "w") as f:
-                json.dump(data, f)
-        except Exception as e:
-            logger.error(f"Failed to save data: {e}")
+        with open("role_mappings.json", "w") as f:
+            json.dump(data, f)
 
     async def has_reqrole(self, ctx):
         """Check if the user has the required role."""
@@ -63,7 +55,7 @@ class RoleManagement(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         logger.info(f'Logged in as {self.bot.user}')
-        self.generate_dynamic_commands()
+        self.generate_dynamic_commands()  # Ensure dynamic commands are generated on bot start
 
     @commands.command()
     async def setreqrole(self, ctx, role: discord.Role):
@@ -74,7 +66,7 @@ class RoleManagement(commands.Cog):
         self.reqrole_id = role.id
         self.save_data()
         logger.info(f'Required role set to {role.name}.')
-        await ctx.send(embed=discord.Embed(description=f"<a:sukoon_whitetick:1323992464058482729> | Required role set to {role.name}.", color=EMBED_COLOR))
+        await ctx.send(embed=discord.Embed(description=f"Required role set to {role.name}.", color=EMBED_COLOR))
 
     @commands.command()
     async def setrole(self, ctx, custom_name: str, role: discord.Role):
@@ -92,6 +84,7 @@ class RoleManagement(commands.Cog):
         logger.info(f'Mapped custom role name "{custom_name}" to role {role.name}.')
         await ctx.send(embed=discord.Embed(description=f"<a:sukoon_whitetick:1323992464058482729> | Mapped custom role name \"{custom_name}\" to role {role.name}.", color=EMBED_COLOR))
 
+        # Ensure dynamic command is registered for the new role
         self.generate_dynamic_commands()
 
     @commands.command()
@@ -103,7 +96,7 @@ class RoleManagement(commands.Cog):
         self.log_channel_id = channel.id
         self.save_data()
         logger.info(f'Log channel set to {channel.name}.')
-        await ctx.send(embed=discord.Embed(description=f"<a:sukoon_whitetick:1323992464058482729> | Log channel set to {channel.name}.", color=EMBED_COLOR))
+        await ctx.send(embed=discord.Embed(description=f"Log channel set to {channel.name}.", color=EMBED_COLOR))
 
     @commands.command()
     async def role(self, ctx):
@@ -185,32 +178,51 @@ class RoleManagement(commands.Cog):
 
     def generate_dynamic_commands(self):
         """Generate dynamic commands for each custom role."""
-        for custom_name in list(self.role_mappings.keys()):
+        for custom_name in self.role_mappings.keys():
+            # Check if command already exists
             if custom_name in self.bot.all_commands:
-                logger.info(f"Command for '{custom_name}' already exists. Updating.")
-                self.bot.remove_command(custom_name)
+                logger.info(f"<:sukoon_info:1323251063910043659> | Command for '{custom_name}' already exists, skipping registration.")
+                continue
 
             async def command(ctx, member: discord.Member = None):
                 await self.dynamic_role_command(ctx, custom_name, member)
 
-            command.__name__ = custom_name
-            command = commands.command()(command)
-            logger.info(f"Registering command for role '{custom_name}'.")
-            setattr(self, custom_name, command)
-            self.bot.add_command(command)
+            command.__name__ = custom_name  # Ensure the command name is the custom role name
+            command = commands.command()(command)  # Apply the command decorator
+            logger.info(f"<a:sukoon_whitetick:1323992464058482729> | Registering dynamic command for role '{custom_name}'.")
+            setattr(self, custom_name, command)  # Attach to the class
+            self.bot.add_command(command)  # Register the command with the bot
 
-    async def cog_load(self):
-        """Load the cog and dynamically generate commands."""
-        self.generate_dynamic_commands()
+    @commands.command()
+    async def deleterole(self, ctx, custom_name: str):
+        """Delete a custom role mapping."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send(embed=discord.Embed(description="<:sukoon_info:1323251063910043659> | You do not have permission to use this command.", color=EMBED_COLOR))
+            return
+
+        # Check if the custom name exists in the role mappings
+        if custom_name not in self.role_mappings:
+            await ctx.send(embed=discord.Embed(description=f"<:sukoon_info:1323251063910043659> | No role mapping found for '{custom_name}'.", color=EMBED_COLOR))
+            return
+
+        # Remove the mapping from role_mappings
+        del self.role_mappings[custom_name]
+        self.save_data()  # Save the updated mappings
+
+        logger.info(f'Deleted role mapping for custom name "{custom_name}".')
+
+        # Ensure the dynamic command for this custom role is also removed
+        if custom_name in self.bot.all_commands:
+            self.bot.remove_command(custom_name)
+            logger.info(f'Removed dynamic command for custom role "{custom_name}".')
+
+        await ctx.send(embed=discord.Embed(description=f"<a:sukoon_whitetick:1323992464058482729> | Successfully deleted the role mapping for '{custom_name}'.", color=EMBED_COLOR))
 
     @commands.command()
     async def set_role_limit(self, ctx, limit: int):
-        """Set the maximum number of custom roles a user can have."""
+        """Set the maximum number of custom roles a user can have.""" 
         if not ctx.author.guild_permissions.administrator:
-            await ctx.send(embed=discord.Embed(description=" <:sukoon_info:1323251063910043659> | You do not have permission to use this command.", color=EMBED_COLOR))
-            return
-        if limit <= 0:
-            await ctx.send(embed=discord.Embed(description="Role limit must be a positive integer.", color=EMBED_COLOR))
+            await ctx.send(embed=discord.Embed(description="<:sukoon_info:1323251063910043659> | You do not have permission to use this command.", color=EMBED_COLOR))
             return
         self.role_assignment_limit = limit
         self.save_data()
