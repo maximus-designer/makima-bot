@@ -113,8 +113,31 @@ class RoleManagement(commands.Cog):
         embed.add_field(name=".setrole [custom_name] [@role]", value="Map a custom name to a role.", inline=False)
         embed.add_field(name=".setlogchannel [channel]", value="Set the log channel for role actions.", inline=False)
         embed.add_field(name=".[custom_name] [@user]", value="Assign/remove the mapped role to/from a user.", inline=False)
+        embed.add_field(name=".remove_all_roles [@user]", value="Remove all custom roles from a user.", inline=False)
         embed.set_footer(text="Role Management Bot")
         await ctx.send(embed=embed)
+
+    @commands.command()
+    async def remove_all_roles(self, ctx, member: discord.Member = None):
+        """Remove all custom roles from a user."""
+        if not await self.has_reqrole(ctx):
+            return
+        if not member:
+            await ctx.send(embed=discord.Embed(description="<:sukoon_info:1323251063910043659> | Please mention a user.", color=EMBED_COLOR))
+            return
+
+        roles_to_remove = [role for custom_name, role_id in self.role_mappings.items()
+                           for role in member.roles if role.id == role_id]
+
+        if roles_to_remove:
+            await member.remove_roles(*roles_to_remove)
+            await ctx.send(embed=discord.Embed(description=f"<a:sukoon_whitetick:1323992464058482729> | Removed all custom roles from {member.mention}.", color=EMBED_COLOR))
+            if self.log_channel_id:
+                log_channel = self.bot.get_channel(self.log_channel_id)
+                if log_channel:
+                    await log_channel.send(embed=discord.Embed(description=f"<a:sukoon_whitetick:1323992464058482729> | {ctx.author} removed all custom roles from {member.mention}.", color=EMBED_COLOR))
+        else:
+            await ctx.send(embed=discord.Embed(description=f"<:sukoon_info:1323251063910043659> | {member.mention} has no custom roles to remove.", color=EMBED_COLOR))
 
     async def assign_or_remove_role(self, ctx, custom_name: str, member: discord.Member):
         """Assign or remove the mapped custom role from a user."""
@@ -170,10 +193,10 @@ class RoleManagement(commands.Cog):
             async def command(ctx, member: discord.Member = None):
                 await self.dynamic_role_command(ctx, custom_name, member)
 
-            command.__name__ = f"role_{custom_name}"  # Ensuring unique command names
+            command.__name__ = custom_name
             command = commands.command()(command)
             logger.info(f"Registering command for role '{custom_name}'.")
-            setattr(self, f"role_{custom_name}", command)
+            setattr(self, custom_name, command)
             self.bot.add_command(command)
 
     async def cog_load(self):
