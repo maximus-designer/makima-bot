@@ -36,6 +36,7 @@ cogs = [
     "cogs.reqrole",
     "cogs.confess",
     "cogs.thread",
+    "cogs.av",
     # Other cogs
 ]
 
