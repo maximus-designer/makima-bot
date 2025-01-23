@@ -4,193 +4,244 @@ import json
 import asyncio
 import logging
 import os
+from typing import Dict, Optional
 
-# Set up logging to log only errors
-logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
+# Improved logging configuration
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('sticky_bot.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 class StickyBot(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.sticky_data = self.load_sticky_data()
-        self.lock = asyncio.Lock()  # Ensure thread-safe operations
+        self.sticky_data: Dict[str, Dict[str, Optional[str]]] = self.load_sticky_data()
+        self.lock = asyncio.Lock()  # Thread-safe operations
         self.sticky_task.start()
 
-    def load_sticky_data(self):
-        """Load sticky message data from storage with error handling."""
+    def load_sticky_data(self) -> Dict[str, Dict[str, Optional[str]]]:
+        """
+        Load sticky message data from storage with robust error handling.
+        
+        Returns:
+            Dict containing sticky message configurations
+        """
         try:
-            if not os.path.exists('sticky_data.json'):
-                with open('sticky_data.json', 'w') as file:
-                    json.dump({}, file)  # Create the file if it doesn't exist
-            with open('sticky_data.json', 'r') as file:
-                return json.load(file)
-        except FileNotFoundError:
-            logging.error("sticky_data.json not found. Creating a new file.")
+            os.makedirs('data', exist_ok=True)  # Ensure data directory exists
+            file_path = 'data/sticky_data.json'
+            
+            # Create file if not exists
+            if not os.path.exists(file_path):
+                with open(file_path, 'w') as file:
+                    json.dump({}, file)
+            
+            # Read and parse data
+            with open(file_path, 'r') as file:
+                data = json.load(file)
+                # Validate data structure
+                return {str(k): v for k, v in data.items() 
+                        if isinstance(v, dict) and 'message' in v}
+        
+        except (FileNotFoundError, PermissionError, json.JSONDecodeError) as e:
+            logger.error(f"Error loading sticky data: {e}")
             return {}
-        except PermissionError:
-            logging.error("Permission error when trying to read sticky_data.json.")
-            return {}
-        except json.JSONDecodeError:
-            logging.error("Error decoding sticky_data.json. The file might be corrupted.")
-            os.remove('sticky_data.json')  # Remove the corrupted file
-            return {}  # Return an empty dictionary to initialize fresh data
 
-    def save_sticky_data(self):
-        """Save sticky message data to storage with error handling."""
+    def save_sticky_data(self) -> None:
+        """
+        Save sticky message data with enhanced error handling.
+        Ensures atomic write and provides detailed logging.
+        """
         try:
-            with open('sticky_data.json', 'w') as file:
-                json.dump(self.sticky_data, file, indent=4)
+            file_path = 'data/sticky_data.json'
+            temp_path = 'data/sticky_data_temp.json'
+            
+            # Write to temporary file first
+            with open(temp_path, 'w') as temp_file:
+                json.dump(self.sticky_data, temp_file, indent=4)
+            
+            # Atomic replace
+            os.replace(temp_path, file_path)
+            logger.info("Sticky data saved successfully")
+        
         except Exception as e:
-            logging.error(f"Failed to save sticky data: {e}")
+            logger.error(f"Failed to save sticky data: {e}")
 
-    async def has_permissions(self, ctx):
-        """Check if the bot has necessary permissions in the channel."""
-        permissions = ctx.channel.permissions_for(ctx.guild.me)
-        if not permissions.send_messages or not permissions.manage_messages or not permissions.read_messages:
-            await ctx.send("The bot lacks necessary permissions (Send Messages, Manage Messages, Read Messages) in this channel.")
+    async def _validate_bot_permissions(self, ctx: commands.Context) -> bool:
+        """
+        Comprehensive permission validation with detailed feedback.
+        
+        Args:
+            ctx: Command context
+        
+        Returns:
+            bool indicating if bot has required permissions
+        """
+        required_permissions = [
+            'send_messages', 
+            'manage_messages', 
+            'read_messages'
+        ]
+        
+        missing_perms = [
+            perm for perm in required_permissions 
+            if not getattr(ctx.channel.permissions_for(ctx.guild.me), perm)
+        ]
+        
+        if missing_perms:
+            await ctx.send(f"Missing bot permissions: {', '.join(missing_perms)}")
             return False
+        
         return True
 
-    @commands.command()
-    async def stick(self, ctx, *, message):
-        """Start or overwrite a sticky message in the channel."""
-        if not ctx.author.guild_permissions.manage_messages:
-            await ctx.send("You do not have permission to manage sticky messages.")
+    @commands.command(name='stick')
+    @commands.has_permissions(manage_messages=True)
+    async def stick_command(self, ctx: commands.Context, *, message: str):
+        """
+        Set or update a sticky message in the current channel.
+        
+        Args:
+            ctx: Command context
+            message: Sticky message content
+        """
+        if not await self._validate_bot_permissions(ctx):
             return
 
-        if not await self.has_permissions(ctx):
-            return
-
-        async with self.lock:  # Prevent concurrent modifications
+        async with self.lock:
             channel_id = str(ctx.channel.id)
+            
+            # Confirmation for overwriting existing sticky
             if channel_id in self.sticky_data:
-                existing_message = self.sticky_data[channel_id]['message']
-                confirmation_message = await ctx.send(
-                    f"A sticky message already exists: `{existing_message}`.\n"
-                    "React with ✅ to overwrite it with the new message or ❌ to keep the old message."
+                confirm_msg = await ctx.send(
+                    f"Overwrite existing sticky: `{self.sticky_data[channel_id]['message']}`? "
+                    "React with ✅ to confirm or ❌ to cancel."
                 )
-                await confirmation_message.add_reaction('✅')
-                await confirmation_message.add_reaction('❌')
-
-                def reaction_check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in ['✅', '❌'] and reaction.message.id == confirmation_message.id
+                await confirm_msg.add_reaction('✅')
+                await confirm_msg.add_reaction('❌')
 
                 try:
-                    reaction, user = await self.bot.wait_for('reaction_add', timeout=30.0, check=reaction_check)
+                    reaction, user = await self.bot.wait_for(
+                        'reaction_add', 
+                        timeout=30.0, 
+                        check=lambda r, u: u == ctx.author and str(r.emoji) in ['✅', '❌']
+                    )
+                    
                     if str(reaction.emoji) == '❌':
-                        await ctx.send("Keeping the old sticky message.")
+                        await ctx.send("Sticky message update cancelled.")
                         return
+
                 except asyncio.TimeoutError:
-                    await ctx.send("You didn't react in time. Sticky message setup canceled.")
+                    await ctx.send("No response. Sticky message update cancelled.")
                     return
 
+            # Set/update sticky message
             self.sticky_data[channel_id] = {
                 'message': message,
                 'last_posted': None,
                 'last_message_id': None
             }
             self.save_sticky_data()
-            await ctx.send(f"Sticky message set for this channel: {message}")
+            await ctx.send(f"Sticky message set: {message}")
 
-    @commands.command()
-    async def stickstop(self, ctx):
-        """Stop the sticky message in the channel."""
-        if not ctx.author.guild_permissions.manage_messages:
-            await ctx.send("You do not have permission to stop the sticky message.")
-            return
-
-        if not await self.has_permissions(ctx):
+    @commands.command(name='stickstop')
+    @commands.has_permissions(manage_messages=True)
+    async def stop_sticky(self, ctx: commands.Context):
+        """
+        Stop and remove the sticky message for the current channel.
+        """
+        if not await self._validate_bot_permissions(ctx):
             return
 
         async with self.lock:
             channel_id = str(ctx.channel.id)
             if channel_id in self.sticky_data:
-                self.sticky_data.pop(channel_id, None)
+                del self.sticky_data[channel_id]
                 self.save_sticky_data()
-                await ctx.send("Sticky message stopped.")
+                await ctx.send("Sticky message stopped and removed.")
             else:
-                await ctx.send("There is no sticky message in this channel.")
+                await ctx.send("No active sticky message in this channel.")
 
     @commands.Cog.listener()
-    async def on_message(self, message):
-        """Repost sticky message when a new message is sent in the channel."""
-        if message.author == self.bot.user:
+    async def on_message(self, message: discord.Message):
+        """
+        Repost sticky message when a new message is sent in the channel.
+        
+        Args:
+            message: The message that triggered the event
+        """
+        # Ignore bot's own messages and commands
+        if message.author == self.bot.user or message.content.startswith(self.bot.command_prefix):
             return
 
         channel_id = str(message.channel.id)
         async with self.lock:
             if channel_id in self.sticky_data:
                 data = self.sticky_data[channel_id]
-                last_message_id = data.get('last_message_id')
+                
+                # Delete previous sticky message safely
+                try:
+                    if data.get('last_message_id'):
+                        try:
+                            previous_sticky = await message.channel.fetch_message(data['last_message_id'])
+                            if previous_sticky.author == self.bot.user:
+                                await previous_sticky.delete()
+                        except discord.NotFound:
+                            pass  # Message already deleted
+                except discord.Forbidden:
+                    logger.warning(f"Cannot delete previous sticky in {channel_id}")
 
-                if last_message_id:
-                    try:
-                        # Try to fetch the previous sticky message by its ID
-                        last_message = await message.channel.fetch_message(last_message_id)
-                        # Check if the last message is from the bot and delete it
-                        if last_message.author == self.bot.user:
-                            await last_message.delete()
-                            logging.error(f"Deleted previous sticky message with ID: {last_message_id}")
-                    except discord.NotFound:
-                        logging.error(f"Sticky message with ID {last_message_id} not found for deletion.")
-                    except discord.Forbidden:
-                        logging.error(f"Bot does not have permission to delete message with ID {last_message_id}.")
-                    except Exception as e:
-                        logging.error(f"Error deleting sticky message with ID {last_message_id}: {str(e)}")
+                # Send new sticky message
+                try:
+                    new_sticky = await message.channel.send(data['message'])
+                    self.sticky_data[channel_id].update({
+                        'last_message_id': new_sticky.id,
+                        'last_posted': discord.utils.utcnow().isoformat()
+                    })
+                    self.save_sticky_data()
+                except discord.Forbidden:
+                    logger.error(f"Cannot send sticky in {channel_id}")
 
-                # Send the new sticky message
-                sticky_message = await message.channel.send(data['message'])
-                # Update the sticky data with the new message ID and timestamp
-                self.sticky_data[channel_id]['last_message_id'] = sticky_message.id
-                self.sticky_data[channel_id]['last_posted'] = discord.utils.utcnow().isoformat()
-                self.save_sticky_data()
-                logging.error(f"Posted new sticky message in channel {channel_id}: {data['message']}")
-
-    @tasks.loop(seconds=300)
+    @tasks.loop(minutes=5)
     async def sticky_task(self):
-        """Task to repost sticky messages every 5 minutes."""
-        logging.error("Sticky task is running.")
+        """
+        Background task to periodically repost sticky messages.
+        Handles channel deletion and permission issues.
+        """
         async with self.lock:
             for channel_id, data in list(self.sticky_data.items()):
-                channel = self.bot.get_channel(int(channel_id))
-                if not channel:
-                    self.sticky_data.pop(channel_id)
-                    self.save_sticky_data()
-                    continue
-
                 try:
-                    # Only repost if the last message has been deleted
-                    last_message_id = data.get('last_message_id')
-                    if last_message_id:
-                        try:
-                            last_message = await channel.fetch_message(last_message_id)
-                            if last_message.author == self.bot.user:
-                                await last_message.delete()
-                                logging.error(f"Deleted previous sticky message in channel {channel_id}.")
-                        except discord.NotFound:
-                            pass  # The message doesn't exist anymore
+                    channel = self.bot.get_channel(int(channel_id))
+                    if not channel:
+                        del self.sticky_data[channel_id]
+                        continue
 
-                    # Check if it's time to update or repost the sticky message
+                    # Repost sticky message
                     sticky_message = await channel.send(data['message'])
-                    self.sticky_data[channel_id]['last_message_id'] = sticky_message.id
-                    self.sticky_data[channel_id]['last_posted'] = discord.utils.utcnow().isoformat()
+                    self.sticky_data[channel_id].update({
+                        'last_message_id': sticky_message.id,
+                        'last_posted': discord.utils.utcnow().isoformat()
+                    })
                     self.save_sticky_data()
 
                 except discord.Forbidden:
-                    logging.error(f"Failed to post sticky message in channel {channel_id}. Missing permissions.")
+                    logger.error(f"Cannot post sticky in channel {channel_id}")
                 except Exception as e:
-                    logging.error(f"Error posting sticky message in channel {channel_id}: {str(e)}")
+                    logger.error(f"Sticky task error in {channel_id}: {e}")
 
     @sticky_task.before_loop
     async def before_sticky_task(self):
+        """Ensure bot is ready before starting sticky task."""
         await self.bot.wait_until_ready()
 
-    async def cog_unload(self):
-        """Stop the sticky task loop when the bot shuts down."""
-        if self.sticky_task.is_running():
-            self.sticky_task.cancel()
-        await self.sticky_task
+    def cog_unload(self):
+        """Gracefully stop the sticky task on cog unload."""
+        self.sticky_task.cancel()
 
-# Add the cog to the bot
 async def setup(bot):
+    """Add StickyBot cog to the bot."""
     await bot.add_cog(StickyBot(bot))
-    logging.error("StickyBot cog loaded successfully.")
+    logger.info("StickyBot cog loaded successfully")
