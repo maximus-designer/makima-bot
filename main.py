@@ -96,5 +96,24 @@ async def ping(ctx):
     latency = bot.latency  # Bot's latency in seconds
     await ctx.send(f'<a:sukoon_greendot:1322894177775783997> Latency is {latency * 1000:.2f}ms')
 
+# Enhanced error handling for commands
+@bot.event
+async def on_command_error(ctx, error):
+    """Handle command errors."""
+    if isinstance(error, commands.CommandNotFound):
+        # Provide a helpful message for unknown commands
+        if ctx.message.content.strip() == ".":
+            await ctx.send(f"❓ You need to specify a command after the prefix. Use `.help` to see available commands.")
+        else:
+            await ctx.send(f"❓ Unknown command. Use `.help` to see available commands.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Missing required argument. Use `.help {ctx.command}` for command usage.")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send(f"❌ Invalid argument. Use `.help {ctx.command}` for correct usage.")
+    else:
+        # Log unexpected errors
+        logging.error(f"Unexpected error: {error}")
+        await ctx.send("An unexpected error occurred. Please try again.")
+
 # Start the bot
 bot.run(DISCORD_TOKEN)
