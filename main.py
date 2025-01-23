@@ -8,7 +8,6 @@ import asyncio
 # Load environment variables
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-
 if not DISCORD_TOKEN:
     raise ValueError("No DISCORD_TOKEN found in .env file")
 
@@ -51,6 +50,10 @@ async def load_cogs():
                 logging.info(f"{cog} is already loaded.")
         except Exception as error:
             logging.error(f"Error loading {cog}: {error}")
+            # Gracefully shut down if a critical cog fails to load (optional)
+            if "critical_cog" in cog:
+                logging.error(f"Critical cog {cog} failed to load. Shutting down.")
+                await bot.close()
 
 async def sync_commands_with_retry():
     """Sync slash commands with retry logic to handle rate limits."""
@@ -68,6 +71,8 @@ async def sync_commands_with_retry():
             else:
                 print(f"Error syncing commands: {e}")
                 logging.error(f"Error syncing commands: {e}")
+                if attempt == retry_attempts - 1:
+                    logging.warning("Failed to sync commands after multiple attempts.")
                 break  # Exit if an unexpected error occurs
 
 @bot.event
@@ -76,17 +81,16 @@ async def on_ready():
     print(f'Logged in as {bot.user}')
     # Load cogs before syncing commands
     await load_cogs()
-
     # Sync commands with retry logic
     await sync_commands_with_retry()
-
     # Print all registered slash commands
     print("Registered slash commands:")
     for command in bot.tree.get_commands():
         print(f"- {command.name}")
 
-# Latency Ping Command
+# Latency Ping Command with rate-limiting
 @bot.command()
+@commands.cooldown(1, 5, commands.BucketType.user)  # 1 command per 5 seconds per user
 async def ping(ctx):
     """A latency ping command."""
     latency = bot.latency  # Bot's latency in seconds
