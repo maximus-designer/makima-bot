@@ -1,46 +1,28 @@
 import discord
 from discord.ext import commands, tasks
-import json
 import asyncio
 import logging
 import os
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import PyMongoError
 
 # Set up logging to log only errors
-logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class StickyBot(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.sticky_data = self.load_sticky_data()
         self.lock = asyncio.Lock()  # Ensure thread-safe operations
+
+        # MongoDB connection setup
+        mongo_uri = os.getenv('MONGO_URL')
+        self.mongo_client = AsyncIOMotorClient(mongo_uri)
+        self.db = self.mongo_client['sticky_bot_db']
+        self.sticky_collection = self.db['sticky_messages']
+
         self.sticky_task.start()
 
-    def load_sticky_data(self):
-        """Load sticky message data from storage with error handling."""
-        try:
-            if not os.path.exists('sticky_data.json'):
-                with open('sticky_data.json', 'w') as file:
-                    json.dump({}, file)  # Create the file if it doesn't exist
-            with open('sticky_data.json', 'r') as file:
-                return json.load(file)
-        except FileNotFoundError:
-            logging.error("sticky_data.json not found. Creating a new file.")
-            return {}
-        except PermissionError:
-            logging.error("Permission error when trying to read sticky_data.json.")
-            return {}
-        except json.JSONDecodeError:
-            logging.error("Error decoding sticky_data.json. The file might be corrupted.")
-            os.remove('sticky_data.json')  # Remove the corrupted file
-            return {}  # Return an empty dictionary to initialize fresh data
-
-    def save_sticky_data(self):
-        """Save sticky message data to storage with error handling."""
-        try:
-            with open('sticky_data.json', 'w') as file:
-                json.dump(self.sticky_data, file, indent=4)
-        except Exception as e:
-            logging.error(f"Failed to save sticky data: {e}")
+        logging.info("StickyBot cog loaded successfully.")
 
     async def has_permissions(self, ctx):
         """Check if the bot has necessary permissions in the channel."""
@@ -61,11 +43,13 @@ class StickyBot(commands.Cog):
             return
 
         async with self.lock:  # Prevent concurrent modifications
-            channel_id = str(ctx.channel.id)
-            if channel_id in self.sticky_data:
-                existing_message = self.sticky_data[channel_id]['message']
+            channel_id = ctx.channel.id
+
+            # Check for existing sticky message
+            existing_doc = await self.sticky_collection.find_one({'channel_id': channel_id})
+            if existing_doc:
                 confirmation_message = await ctx.send(
-                    f"A sticky message already exists: `{existing_message}`.\n"
+                    f"A sticky message already exists: `{existing_doc['message']}`.\n"
                     "React with ✅ to overwrite it with the new message or ❌ to keep the old message."
                 )
                 await confirmation_message.add_reaction('✅')
@@ -83,12 +67,19 @@ class StickyBot(commands.Cog):
                     await ctx.send("You didn't react in time. Sticky message setup canceled.")
                     return
 
-            self.sticky_data[channel_id] = {
+            # Prepare and save sticky message data
+            sticky_data = {
+                'channel_id': channel_id,
+                'guild_id': ctx.guild.id,
                 'message': message,
                 'last_posted': None,
                 'last_message_id': None
             }
-            self.save_sticky_data()
+            await self.sticky_collection.update_one(
+                {'channel_id': channel_id},
+                {'$set': sticky_data},
+                upsert=True
+            )
             await ctx.send(f"Sticky message set for this channel: {message}")
 
     @commands.command()
@@ -102,10 +93,10 @@ class StickyBot(commands.Cog):
             return
 
         async with self.lock:
-            channel_id = str(ctx.channel.id)
-            if channel_id in self.sticky_data:
-                self.sticky_data.pop(channel_id, None)
-                self.save_sticky_data()
+            channel_id = ctx.channel.id
+            result = await self.sticky_collection.delete_one({'channel_id': channel_id})
+
+            if result.deleted_count > 0:
                 await ctx.send("Sticky message stopped.")
             else:
                 await ctx.send("There is no sticky message in this channel.")
@@ -116,81 +107,106 @@ class StickyBot(commands.Cog):
         if message.author == self.bot.user:
             return
 
-        channel_id = str(message.channel.id)
-        async with self.lock:
-            if channel_id in self.sticky_data:
-                data = self.sticky_data[channel_id]
-                last_message_id = data.get('last_message_id')
+        # Check if the bot has the required permissions before posting
+        permissions = message.channel.permissions_for(message.guild.me)
+        if not permissions.send_messages or not permissions.manage_messages:
+            logging.error(f"Bot does not have required permissions in channel {message.channel.id}")
+            return
 
+        # Fetch sticky message data from MongoDB
+        sticky_doc = await self.sticky_collection.find_one({'channel_id': message.channel.id})
+
+        if sticky_doc:
+            async with self.lock:
+                # Check if necessary fields exist in the document
+                if 'message' not in sticky_doc or 'channel_id' not in sticky_doc:
+                    logging.error(f"Sticky message document missing necessary fields: {sticky_doc}")
+                    return
+
+                # Delete previous sticky message if it exists
+                last_message_id = sticky_doc.get('last_message_id')
                 if last_message_id:
                     try:
-                        # Try to fetch the previous sticky message by its ID
                         last_message = await message.channel.fetch_message(last_message_id)
-                        # Check if the last message is from the bot and delete it
                         if last_message.author == self.bot.user:
                             await last_message.delete()
-                            logging.error(f"Deleted previous sticky message with ID: {last_message_id}")
-                    except discord.NotFound:
-                        logging.error(f"Sticky message with ID {last_message_id} not found for deletion.")
-                    except discord.Forbidden:
-                        logging.error(f"Bot does not have permission to delete message with ID {last_message_id}.")
+                    except (discord.NotFound, discord.Forbidden):
+                        pass
                     except Exception as e:
-                        logging.error(f"Error deleting sticky message with ID {last_message_id}: {str(e)}")
+                        logging.error(f"Error deleting previous sticky message: {str(e)}")
 
-                # Send the new sticky message
-                sticky_message = await message.channel.send(data['message'])
-                # Update the sticky data with the new message ID and timestamp
-                self.sticky_data[channel_id]['last_message_id'] = sticky_message.id
-                self.sticky_data[channel_id]['last_posted'] = discord.utils.utcnow().isoformat()
-                self.save_sticky_data()
-                logging.error(f"Posted new sticky message in channel {channel_id}: {data['message']}")
+                # Send new sticky message
+                try:
+                    sticky_message = await message.channel.send(sticky_doc['message'])
 
-    @tasks.loop(seconds=300)
+                    # Update sticky data in MongoDB
+                    await self.sticky_collection.update_one(
+                        {'channel_id': message.channel.id},
+                        {'$set': {
+                            'last_message_id': sticky_message.id,
+                            'last_posted': discord.utils.utcnow().isoformat()
+                        }}
+                    )
+                except Exception as e:
+                    logging.error(f"Error sending sticky message: {str(e)}")
+
+    @tasks.loop(seconds=60)
     async def sticky_task(self):
-        """Task to repost sticky messages every 5 minutes."""
-        logging.error("Sticky task is running.")
-        async with self.lock:
-            for channel_id, data in list(self.sticky_data.items()):
-                channel = self.bot.get_channel(int(channel_id))
-                if not channel:
-                    self.sticky_data.pop(channel_id)
-                    self.save_sticky_data()
+        """Task to repost sticky messages every 1 minute."""
+        async for document in self.sticky_collection.find():
+            try:
+                # Ensure document contains the necessary fields before processing
+                if 'channel_id' not in document or 'message' not in document:
+                    logging.error(f"Skipping invalid sticky message document: {document}")
                     continue
 
-                try:
-                    # Only repost if the last message has been deleted
-                    last_message_id = data.get('last_message_id')
-                    if last_message_id:
-                        try:
-                            last_message = await channel.fetch_message(last_message_id)
-                            if last_message.author == self.bot.user:
-                                await last_message.delete()
-                                logging.error(f"Deleted previous sticky message in channel {channel_id}.")
-                        except discord.NotFound:
-                            pass  # The message doesn't exist anymore
+                channel_id = document['channel_id']
+                channel = self.bot.get_channel(channel_id)
 
-                    # Check if it's time to update or repost the sticky message
-                    sticky_message = await channel.send(data['message'])
-                    self.sticky_data[channel_id]['last_message_id'] = sticky_message.id
-                    self.sticky_data[channel_id]['last_posted'] = discord.utils.utcnow().isoformat()
-                    self.save_sticky_data()
+                if not channel:
+                    # Remove sticky data for non-existent channels
+                    await self.sticky_collection.delete_one({'channel_id': channel_id})
+                    continue
 
-                except discord.Forbidden:
-                    logging.error(f"Failed to post sticky message in channel {channel_id}. Missing permissions.")
-                except Exception as e:
-                    logging.error(f"Error posting sticky message in channel {channel_id}: {str(e)}")
+                # Delete previous sticky message
+                last_message_id = document.get('last_message_id')
+                if last_message_id:
+                    try:
+                        last_message = await channel.fetch_message(last_message_id)
+                        if last_message.author == self.bot.user:
+                            await last_message.delete()
+                    except discord.NotFound:
+                        pass
+
+                # Send new sticky message
+                sticky_message = await channel.send(document['message'])
+
+                # Update sticky data in MongoDB
+                await self.sticky_collection.update_one(
+                    {'channel_id': channel_id},
+                    {'$set': {
+                        'last_message_id': sticky_message.id,
+                        'last_posted': discord.utils.utcnow().isoformat()
+                    }}
+                )
+
+            except discord.Forbidden:
+                logging.error(f"Failed to post sticky message in channel {channel_id}. Missing permissions.")
+            except Exception as e:
+                logging.error(f"Error processing sticky message document: {e}")
+                logging.error(f"Problematic document: {document}")
 
     @sticky_task.before_loop
     async def before_sticky_task(self):
         await self.bot.wait_until_ready()
 
-    async def cog_unload(self):
+    def cog_unload(self):
         """Stop the sticky task loop when the bot shuts down."""
         if self.sticky_task.is_running():
             self.sticky_task.cancel()
-        await self.sticky_task
+        self.mongo_client.close()
 
 # Add the cog to the bot
 async def setup(bot):
     await bot.add_cog(StickyBot(bot))
-    logging.error("StickyBot cog loaded successfully.")
+    logging.info("StickyBot cog loaded successfully.")
