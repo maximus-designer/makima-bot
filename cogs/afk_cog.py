@@ -24,7 +24,7 @@ class AFK(commands.Cog):
         """Initialize MongoDB connection and ensure the collection exists."""
         try:
             if not self.mongo_uri:
-                raise ValueError("MongoDB URI not found. Ensure MONGO_URI is set in your .env file.")
+                raise ValueError("MongoDB URI not found. Ensure MONGO_URL is set in your .env file.")
 
             self.db_client = AsyncIOMotorClient(self.mongo_uri, serverSelectionTimeoutMS=5000)
             # Test the connection
