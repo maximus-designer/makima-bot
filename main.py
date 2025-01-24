@@ -36,6 +36,7 @@ cogs = [
     "cogs.confess",
     "cogs.thread",
     "cogs.av",
+    "cogs.key_generator",
     # Other cogs
 ]
 
