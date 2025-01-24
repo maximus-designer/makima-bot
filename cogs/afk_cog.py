@@ -31,7 +31,7 @@ class AFK(commands.Cog):
             await self.db_client.server_info()
             self.db = self.db_client[self.database_name]
             self.afk_collection = self.db[self.collection_name]
-            print("MongoDB connected and collection initialized.")
+            print("MongoDB connected and collection initialized for afk cog.")
         except Exception as e:
             print(f"Failed to connect to MongoDB: {e}")
             raise
