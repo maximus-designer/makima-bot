@@ -34,3 +34,4 @@ aiosqlite==0.17.0
 pytz==2024.2
 pymongo==4.8.0
 motor==3.5.3
+cachetools==5.3.1
