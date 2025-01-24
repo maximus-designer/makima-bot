@@ -12,7 +12,7 @@ class KeyManagerCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         try:
-            self.mongo_client = MongoClient(os.getenv("MONGO_PUBLIC_URL"))
+            self.mongo_client = MongoClient(os.getenv("MONGO_URL"))
             self.db = self.mongo_client["key-manager"]
             self.storage_collection = self.db["storage"]
             self.redeem_role_id = None
