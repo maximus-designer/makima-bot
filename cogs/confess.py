@@ -1,42 +1,55 @@
-# confessions.py
 import discord
 from discord import app_commands
 from discord.ext import commands
-import json
 import os
 from typing import Optional
 from datetime import datetime
 import aiohttp
 import io
+from pymongo import MongoClient
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 class ConfigManager:
-    def __init__(self, filename='confession_settings.json'):
-        self.filename = filename
-        self._ensure_file_exists()
-
-    def _ensure_file_exists(self):
-        if not os.path.exists(self.filename):
-            with open(self.filename, 'w') as f:
-                json.dump({}, f)
-
-    def load_settings(self):
-        with open(self.filename, 'r') as f:
-            return json.load(f)
-
-    def save_settings(self, settings):
-        with open(self.filename, 'w') as f:
-            json.dump(settings, f, indent=4)
+    def __init__(self):
+        # MongoDB connection using credentials from environment variables
+        self.client = MongoClient(os.getenv('MONGO_URL'))
+        self.db = self.client['confessions']
+        self.guild_collection = self.db['guild_settings']
+        self.confessions_collection = self.db['confessions']
 
     def get_guild_settings(self, guild_id: str):
-        settings = self.load_settings()
-        return settings.get(str(guild_id), {})
+        # Get guild settings from the database
+        guild_settings = self.guild_collection.find_one({"guild_id": guild_id})
+        return guild_settings or {}
 
     def update_guild_settings(self, guild_id: str, new_settings: dict):
-        settings = self.load_settings()
-        if str(guild_id) not in settings:
-            settings[str(guild_id)] = {}
-        settings[str(guild_id)].update(new_settings)
-        self.save_settings(settings)
+        # Update the settings for the given guild
+        self.guild_collection.update_one(
+            {"guild_id": guild_id},
+            {"$set": new_settings},
+            upsert=True
+        )
+
+    def add_confession(self, guild_id: str, message_id: str, author_id: str, title: Optional[str], content: str):
+        # Add confession to database
+        confession_data = {
+            "guild_id": guild_id,
+            "message_id": message_id,
+            "author_id": str(author_id),
+            "title": title,
+            "content": content,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        self.confessions_collection.insert_one(confession_data)
+
+    def get_confession_stats(self, guild_id: str):
+        # Get confession statistics
+        total_confessions = self.confessions_collection.count_documents({"guild_id": guild_id})
+        unique_users = len(self.confessions_collection.distinct("author_id", {"guild_id": guild_id}))
+        return total_confessions, unique_users
 
 class ConfessionModal(discord.ui.Modal):
     def __init__(self, bot, is_reply=False, original_message_id=None):
@@ -72,6 +85,15 @@ class ConfessionModal(discord.ui.Modal):
         self.add_item(self.title_input)
         self.add_item(self.confession_input)
         self.add_item(self.attachment_url)
+
+    async def download_attachment(self, url):
+        """Download an image from a URL"""
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.read()
+                return discord.File(io.BytesIO(data), filename="attachment.png")
 
     async def on_submit(self, interaction: discord.Interaction):
         config = ConfigManager()
@@ -114,14 +136,14 @@ class ConfessionModal(discord.ui.Modal):
             view = ConfessionView(self.bot)
             message = await confession_channel.send(embed=embed, view=view, file=file)
 
-            # Save message data for verification
-            if 'message_data' not in guild_settings:
-                guild_settings['message_data'] = {}
-            guild_settings['message_data'][str(message.id)] = {
-                'author_id': str(interaction.user.id),  # Ensure user ID is stored as a string
-                'timestamp': datetime.utcnow().isoformat()
-            }
-            config.update_guild_settings(str(interaction.guild_id), guild_settings)
+            # Save confession to database
+            config.add_confession(
+                guild_id=str(interaction.guild_id),
+                message_id=str(message.id),
+                author_id=interaction.user.id,
+                title=self.title_input.value,
+                content=self.confession_input.value
+            )
 
         else:
             # Handle reply in thread
@@ -149,7 +171,7 @@ class ConfessionModal(discord.ui.Modal):
                 await log_channel.send(embed=log_embed)
 
         await interaction.response.send_message("Your message has been submitted!", ephemeral=True)
-        
+
 class ConfessionView(discord.ui.View):
     def __init__(self, bot):
         super().__init__(timeout=None)
@@ -231,11 +253,7 @@ class Confessions(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def confession_stats(self, interaction: discord.Interaction):
         """View confession statistics"""
-        guild_settings = self.config.get_guild_settings(str(interaction.guild_id))
-        message_data = guild_settings.get('message_data', {})
-
-        total_confessions = len(message_data)
-        unique_users = len(set(data['author_id'] for data in message_data.values()))
+        total_confessions, unique_users = self.config.get_confession_stats(str(interaction.guild_id))
 
         embed = discord.Embed(
             title="Confession Statistics",
