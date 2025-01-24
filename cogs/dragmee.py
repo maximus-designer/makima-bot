@@ -1,8 +1,18 @@
+import os
+from pymongo import MongoClient
 import discord
 from discord.ext import commands
 import logging
-import os
-import json
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# MongoDB connection setup using the environment variable
+MONGODB_URI = os.getenv('MONGO_URL')
+client = MongoClient(MONGODB_URI)  # Use the MongoDB URI from environment variable
+db = client['dragmebot']  # Database name
+request_channels_collection = db['request_channels']  # Collection for storing request channels
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -11,27 +21,31 @@ logging.basicConfig(level=logging.DEBUG)
 # Global dictionary to store request channels by guild ID
 request_channels = {}
 
-def load_request_channels():
+def load_request_channels(guild_id):
     global request_channels
-    if os.path.exists("request_channels.json"):
-        with open("request_channels.json", "r") as f:
-            try:
-                request_channels = json.load(f)
-                logger.info("Loaded request channels: %s", request_channels)
-            except json.JSONDecodeError:
-                logger.warning("Failed to load JSON. Initializing empty.")
-                request_channels = {}
+    request_channels_data = request_channels_collection.find_one({"guild_id": str(guild_id)})
+
+    if request_channels_data:
+        # Check if 'channels' key exists in the data
+        if 'channels' in request_channels_data:
+            request_channels = request_channels_data['channels']
+            logger.info("Loaded request channels from MongoDB: %s", request_channels)
+        else:
+            logger.warning(f"No 'channels' key found for guild {guild_id}. Using default empty channels.")
+            request_channels = {}  # Default empty dictionary if 'channels' key is missing
     else:
+        logger.warning(f"No data found for guild {guild_id}. Using default empty channels.")
         request_channels = {}
 
-def save_request_channels():
+
+def save_request_channels(guild_id):
     global request_channels
-    try:
-        with open("request_channels.json", "w") as f:
-            json.dump(request_channels, f, indent=4)
-        logger.info("Saved request channels: %s", request_channels)
-    except IOError as e:
-        logger.error("Failed to save request channels: %s", e)
+    request_channels_collection.update_one(
+        {"guild_id": str(guild_id)}, 
+        {"$set": {"channels": request_channels}}, 
+        upsert=True
+    )
+    logger.info("Saved request channels to MongoDB: %s", request_channels)
 
 class DragmeButtons(discord.ui.View):
     def __init__(self, target_user, interaction_user, target_voice_channel, request_message=None, timeout=30):
@@ -105,7 +119,6 @@ class DragmeButtons(discord.ui.View):
 class DragmeCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        load_request_channels()
         logger.info("DragmeCog initialized.")
 
     async def check_permissions(self, interaction):
@@ -125,6 +138,8 @@ class DragmeCog(commands.Cog):
     @commands.cooldown(1, 60, commands.BucketType.user)
     @discord.app_commands.command(name="dragmee", description="Request to be dragged into a voice channel.")
     async def dragme(self, interaction: discord.Interaction, target_user: discord.Member):
+        load_request_channels(interaction.guild.id)  # Load request channels on each interaction
+
         request_channel_id = request_channels.get(str(interaction.guild.id))
 
         if request_channel_id is None or interaction.channel.id != int(request_channel_id):
@@ -167,10 +182,8 @@ class DragmeCog(commands.Cog):
                 await interaction.response.send_message(
                     embed=discord.Embed(
                         title="Permission Issue",
-                        description=(
-                            f"I cannot use {channel.mention} because I lack the required permissions "
-                            "(Send Messages, View Channel). Please adjust the permissions or choose another channel."
-                        ),
+                        description=(f"I cannot use {channel.mention} because I lack the required permissions "
+                                      "(Send Messages, View Channel). Please adjust the permissions or choose another channel."),
                         color=discord.Color.orange()
                     ),
                     ephemeral=True
@@ -179,7 +192,7 @@ class DragmeCog(commands.Cog):
 
             # Save the specified channel
             request_channels[guild_id] = str(channel.id)
-            save_request_channels()
+            save_request_channels(guild_id)  # Save the request channel
             await interaction.response.send_message(
                 embed=discord.Embed(
                     title="Setup Complete",
@@ -208,10 +221,8 @@ class DragmeCog(commands.Cog):
                         await interaction.response.send_message(
                             embed=discord.Embed(
                                 title="Permission Issue",
-                                description=(
-                                    f"I found the existing request channel: {existing_channel.mention}, "
-                                    "but I lack the required permissions. Please adjust them or choose a new channel."
-                                ),
+                                description=(f"I found the existing request channel: {existing_channel.mention}, "
+                                              "but I lack the required permissions. Please adjust them or choose a new channel."),
                                 color=discord.Color.orange()
                             ),
                             ephemeral=True
@@ -233,7 +244,7 @@ class DragmeCog(commands.Cog):
             try:
                 new_channel = await interaction.guild.create_text_channel("drag-requests")
                 request_channels[guild_id] = str(new_channel.id)
-                save_request_channels()
+                save_request_channels(guild_id)  # Save the new channel
                 await interaction.response.send_message(
                     embed=discord.Embed(
                         title="Setup Complete",
