@@ -1,93 +1,55 @@
 import discord
 import random
-import sqlite3
 from datetime import datetime
 from discord.ext import commands, tasks
 import logging
 from logging.handlers import RotatingFileHandler
 import asyncio
-from typing import Optional, List, Tuple
+from typing import Optional, List, Dict
 import pytz
+import os
+from motor.motor_asyncio import AsyncIOMotorClient
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Constants
-LOG_FILE = 'giveaway_logs.log'
-DATABASE_FILE = 'giveaways.db'
-REACTION_EMOJI = "<:sukoon_taaada:1324071825910792223>"  # Standard party emoji
+REACTION_EMOJI = "<:sukoon_taaada:1324071825910792223>"
 DOT_EMOJI = "<:sukoon_blackdot:1322894649488314378>"
 RED_DOT_EMOJI = "<:sukoon_redpoint:1322894737736339459>"
 EMBED_COLOR = 0x2f3136
-CLEANUP_INTERVAL = 60  # Interval to check for ended giveaways
-
-# Configure logging
-logger = logging.getLogger('GiveawayBot')
-handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
-handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(handler)
-logger.setLevel(logging.WARNING)  # Set to WARNING to reduce logs
+CLEANUP_INTERVAL = 60
 
 class DatabaseManager:
-    """Manages database interactions with asyncio support."""
+    """Manages MongoDB interactions."""
 
-    def __init__(self):
-        self.lock = asyncio.Lock()
-
-    async def execute(self, query: str, params: tuple = (), fetch: bool = False) -> Optional[List[Tuple]]:
-        """Executes SQL queries with thread safety."""
-        async with self.lock:
-            try:
-                conn = sqlite3.connect(DATABASE_FILE)
-                cur = conn.cursor()
-                cur.execute(query, params)
-                result = cur.fetchall() if fetch else None
-                conn.commit()
-                conn.close()
-                return result
-            except Exception as e:
-                logger.error(f"Database error: {e}")
-                if 'conn' in locals():
-                    conn.rollback()
-                    conn.close()
-                return [] if fetch else None
+    def __init__(self, mongo_uri: str, database_name: str):
+        self.client = AsyncIOMotorClient(mongo_uri)
+        self.db = self.client[database_name]
+        self.giveaways_collection = self.db['giveaways']
+        self.participants_collection = self.db['participants']
 
     async def init(self):
-        """Initializes the required database tables."""
-        # Drop and recreate giveaways table
-        await self.execute('''
-            DROP TABLE IF EXISTS giveaways
-        ''')
-        await self.execute('''
-            CREATE TABLE IF NOT EXISTS giveaways (
-                message_id TEXT PRIMARY KEY, 
-                channel_id INTEGER, 
-                end_time INTEGER, 
-                winners INTEGER, 
-                prize TEXT, 
-                status TEXT, 
-                host_id INTEGER,
-                created_at INTEGER
-            )
-        ''')
-        # Drop and recreate participants table
-        await self.execute('''
-            DROP TABLE IF EXISTS participants
-        ''')
-        await self.execute('''
-            CREATE TABLE IF NOT EXISTS participants (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id TEXT, 
-                user_id INTEGER,
-                UNIQUE(message_id, user_id)
-            )
-        ''')
-        # Log the table schema for debugging
-        schema = await self.execute("PRAGMA table_info(giveaways)", fetch=True)
-        logger.warning(f"Giveaways table schema: {schema}")
-
+        """Initializes indexes for collections."""
+        await self.giveaways_collection.create_index('message_id', unique=True)
+        await self.participants_collection.create_index([('message_id', 1), ('user_id', 1)], unique=True)
 
 class Giveaway(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.db = DatabaseManager()
+        mongo_uri = os.getenv('MONGO_URL')
+        database_name = os.getenv('MONGO_DATABASE', 'giveaway_bot')
+
+        # Configure logging
+        log_file = os.getenv('LOG_FILE', 'giveaway_logs.log')
+        self.logger = logging.getLogger('GiveawayBot')
+        handler = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3)
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.logger.addHandler(handler)
+        self.logger.setLevel(logging.WARNING)
+
+        self.db = DatabaseManager(mongo_uri, database_name)
         self._checking = False
         self._ready = asyncio.Event()
         self.check_giveaways.start()
@@ -132,11 +94,11 @@ class Giveaway(commands.Cog):
             end_timestamp = int(datetime.utcnow().timestamp() + duration_seconds)
 
             # Send the giveaway title before the embed
-            await interaction.channel.send("**🎉 GIVEAWAY 🎉**")
+            await interaction.channel.send("**<:sukoon_taaada:1324071825910792223> GIVEAWAY <:sukoon_taaada:1324071825910792223>**")
 
             # Format the end time for the embed footer
             end_time = datetime.utcfromtimestamp(end_timestamp).replace(tzinfo=pytz.utc)
-            local_time = end_time.astimezone(pytz.timezone("Asia/Kolkata"))  # Replace with your timezone if needed
+            local_time = end_time.astimezone(pytz.timezone("Asia/Kolkata"))
             formatted_time = local_time.strftime("%A at %I:%M %p") if local_time.date() > datetime.utcnow().date() else local_time.strftime("Today at %I:%M %p")
 
             # Create and send the giveaway embed
@@ -151,83 +113,91 @@ class Giveaway(commands.Cog):
             message = await interaction.channel.send(embed=embed)
             await message.add_reaction(REACTION_EMOJI)
 
-            # Store giveaway in the database
-            await self.db.execute(
-                "INSERT INTO giveaways VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    str(message.id),                     # message_id
-                    interaction.channel.id,              # channel_id
-                    end_timestamp,                       # end_time
-                    winners,                             # winners
-                    prize,                               # prize
-                    "active",                            # status
-                    interaction.user.id,                 # host_id
-                    int(datetime.utcnow().timestamp())   # created_at
-                )
-            )
+            # Store giveaway in MongoDB
+            giveaway_doc = {
+                'message_id': str(message.id),
+                'channel_id': interaction.channel.id,
+                'end_time': end_timestamp,
+                'winners': winners,
+                'prize': prize,
+                'status': 'active',
+                'host_id': interaction.user.id,
+                'created_at': int(datetime.utcnow().timestamp())
+            }
+            await self.db.giveaways_collection.insert_one(giveaway_doc)
 
             await interaction.followup.send("Giveaway started successfully!", ephemeral=True)
 
         except ValueError as e:
             await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
         except Exception as e:
-            logger.error(f"Error starting giveaway: {e}")
+            self.logger.error(f"Error starting giveaway: {e}")
             await interaction.followup.send("An unexpected error occurred.", ephemeral=True)
 
     async def end_giveaway(self, message_id: str):
         """Ends an active giveaway and announces winners."""
         try:
-            giveaway = await self.db.execute(
-                "SELECT * FROM giveaways WHERE message_id=? AND status='active'",
-                (message_id,), True
-            )
+            # Fetch giveaway from MongoDB
+            giveaway = await self.db.giveaways_collection.find_one({
+                'message_id': message_id, 
+                'status': 'active'
+            })
+
             if not giveaway:
                 return
 
-            giveaway = giveaway[0]
-            channel = self.bot.get_channel(giveaway[1])
+            channel = self.bot.get_channel(giveaway['channel_id'])
             if not channel:
                 return
 
             try:
                 message = await channel.fetch_message(int(message_id))
             except discord.NotFound:
-                await self.db.execute("UPDATE giveaways SET status='ended' WHERE message_id=?", (message_id,))
+                await self.db.giveaways_collection.update_one(
+                    {'message_id': message_id},
+                    {'$set': {'status': 'ended'}}
+                )
                 return
 
-            participants = await self.db.execute(
-                "SELECT DISTINCT user_id FROM participants WHERE message_id=?",
-                (message_id,), True
-            )
-            valid_participants = [p[0] for p in participants if p[0] != self.bot.user.id]
+            # Fetch participants
+            participants_cursor = self.db.participants_collection.find({
+                'message_id': message_id
+            })
+            participants = await participants_cursor.to_list(length=None)
 
-            winners = random.sample(valid_participants, min(len(valid_participants), giveaway[3])) if valid_participants else []
+            valid_participants = [p['user_id'] for p in participants if p['user_id'] != self.bot.user.id]
+
+            winners = random.sample(valid_participants, min(len(valid_participants), giveaway['winners'])) if valid_participants else []
             winner_mentions = [f"<@{w}>" for w in winners] if winners else ["No winners (no participants)."]
 
             # Format the end time for the footer
             end_time = datetime.utcnow().replace(tzinfo=pytz.utc)
-            local_time = end_time.astimezone(pytz.timezone("Asia/Kolkata"))  # Replace with your timezone if needed
+            local_time = end_time.astimezone(pytz.timezone("Asia/Kolkata"))
             formatted_time = local_time.strftime("%m/%d/%y, %I:%M %p")
 
             # Update the embed with the results
             embed = discord.Embed(
                 description=f"{DOT_EMOJI} Ended: <t:{int(datetime.utcnow().timestamp())}:R>\n"
                             f"{RED_DOT_EMOJI} Winners: {', '.join(winner_mentions)}\n"
-                            f"{DOT_EMOJI} Hosted by: <@{giveaway[6]}>",
+                            f"{DOT_EMOJI} Hosted by: <@{giveaway['host_id']}>",
                 color=EMBED_COLOR
             )
-            embed.set_author(name=giveaway[4], icon_url=channel.guild.icon.url if channel.guild.icon else None)
+            embed.set_author(name=giveaway['prize'], icon_url=channel.guild.icon.url if channel.guild.icon else None)
             embed.set_footer(text=f"Ended at • {formatted_time}")
             await message.edit(embed=embed)
 
             if winners:
-                await message.reply(f"<:sukoon_taaada:1324071825910792223> Congratulations {', '.join(winner_mentions)}! "
-                                    f"You won **{giveaway[4]}**!")
+                await message.reply(f"{REACTION_EMOJI} Congratulations {', '.join(winner_mentions)}! "
+                                    f"You won **{giveaway['prize']}**!")
 
-            await self.db.execute("UPDATE giveaways SET status='ended' WHERE message_id=?", (message_id,))
+            # Update giveaway status
+            await self.db.giveaways_collection.update_one(
+                {'message_id': message_id},
+                {'$set': {'status': 'ended'}}
+            )
 
         except Exception as e:
-            logger.error(f"Error ending giveaway {message_id}: {e}")
+            self.logger.error(f"Error ending giveaway {message_id}: {e}")
 
     @tasks.loop(seconds=CLEANUP_INTERVAL)
     async def check_giveaways(self):
@@ -239,13 +209,15 @@ class Giveaway(commands.Cog):
         try:
             self._checking = True
             current_time = int(datetime.utcnow().timestamp())
-            active_giveaways = await self.db.execute(
-                "SELECT message_id FROM giveaways WHERE end_time <= ? AND status='active'",
-                (current_time,), True
-            )
+
+            # Find active giveaways that have ended
+            active_giveaways = await self.db.giveaways_collection.find({
+                'end_time': {'$lte': current_time}, 
+                'status': 'active'
+            }).to_list(length=None)
 
             for giveaway in active_giveaways:
-                await self.end_giveaway(giveaway[0])
+                await self.end_giveaway(giveaway['message_id'])
 
         finally:
             self._checking = False
@@ -256,9 +228,16 @@ class Giveaway(commands.Cog):
         if str(payload.emoji) != REACTION_EMOJI or payload.user_id == self.bot.user.id:
             return
 
-        await self.db.execute(
-            "INSERT OR IGNORE INTO participants (message_id, user_id) VALUES (?, ?)",
-            (str(payload.message_id), payload.user_id)
+        await self.db.participants_collection.update_one(
+            {
+                'message_id': str(payload.message_id),
+                'user_id': payload.user_id
+            },
+            {'$set': {
+                'message_id': str(payload.message_id),
+                'user_id': payload.user_id
+            }},
+            upsert=True
         )
 
     @commands.Cog.listener()
@@ -267,10 +246,89 @@ class Giveaway(commands.Cog):
         if str(payload.emoji) != REACTION_EMOJI or payload.user_id == self.bot.user.id:
             return
 
-        await self.db.execute(
-            "DELETE FROM participants WHERE message_id=? AND user_id=?",
-            (str(payload.message_id), payload.user_id)
-        )
+        await self.db.participants_collection.delete_one({
+            'message_id': str(payload.message_id),
+            'user_id': payload.user_id
+        })
 
-async def setup(bot: commands.Bot):
+    @commands.command(name="reroll")
+    @commands.has_permissions(manage_guild=True)
+    async def reroll_giveaway(self, ctx):
+        """Reroll winners for a giveaway when replying to its message."""
+        # Check if the message being replied to is a giveaway embed
+        if not ctx.message.reference or not ctx.message.reference.message_id:
+            await ctx.send("Please reply to a giveaway message to reroll.", ephemeral=True)
+            return
+
+        try:
+            # Fetch the original giveaway message
+            original_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+
+            # Verify it's a giveaway embed
+            if not original_message.embeds or not original_message.embeds[0].author:
+                await ctx.send("This doesn't appear to be a giveaway message.", ephemeral=True)
+                return
+
+            # Fetch giveaway details from MongoDB
+            giveaway = await self.db.giveaways_collection.find_one({
+                'message_id': str(original_message.id),
+                'status': 'ended'
+            })
+
+            if not giveaway:
+                await ctx.send("This giveaway hasn't ended or cannot be rerolled.", ephemeral=True)
+                return
+
+            # Ensure giveaway['winners'] is always a list
+            winners_list = giveaway.get('winners', [])
+            if not isinstance(winners_list, list):
+                winners_list = [winners_list]  # Make sure it's a list even if it's a single value
+
+            # Fetch participants
+            participants_cursor = self.db.participants_collection.find({
+                'message_id': str(original_message.id)
+            })
+            participants = await participants_cursor.to_list(length=None)
+
+            valid_participants = [p['user_id'] for p in participants if p['user_id'] != self.bot.user.id]
+
+            # Fetch previous winners with the corrected query
+            previous_winners_cursor = self.db.participants_collection.find({
+                'message_id': str(original_message.id),
+                'user_id': {'$in': winners_list}  # Use the corrected array
+            })
+            previous_winners = await previous_winners_cursor.to_list(length=None)
+            previous_winner_ids = set(p['user_id'] for p in previous_winners)
+
+            # Remove previous winners from valid participants
+            valid_participants = [p for p in valid_participants if p not in previous_winner_ids]
+
+            if not valid_participants:
+                await ctx.send("No participants left for rerolling.", ephemeral=True)
+                return
+
+            # Reroll winners
+            new_winners = random.sample(valid_participants, min(len(valid_participants), giveaway['winners'])) if valid_participants else []
+            winner_mentions = [f"<@{w}>" for w in new_winners] if new_winners else ["No winners (no participants)."]
+
+            # Update the original message
+            embed = discord.Embed(
+                description=f"{DOT_EMOJI} Ended: <t:{int(datetime.utcnow().timestamp())}:R>\n"
+                            f"{RED_DOT_EMOJI} Winners: {', '.join(winner_mentions)}\n"
+                            f"{DOT_EMOJI} Hosted by: <@{giveaway['host_id']}>",
+                color=EMBED_COLOR
+            )
+            # Send reroll announcement
+            if new_winners:
+                await ctx.send(f"{REACTION_EMOJI} Congratulations {', '.join(winner_mentions)}! "
+                               f"Congratulations on winning **{giveaway['prize']}**!")
+            else:
+                await ctx.send("Reroll failed due to no participants.")
+
+        except Exception as e:
+            self.logger.error(f"Error rerolling giveaway: {e}")
+            await ctx.send("An error occurred while rerolling the giveaway.", ephemeral=True)
+
+
+async def setup(bot):
     await bot.add_cog(Giveaway(bot))
