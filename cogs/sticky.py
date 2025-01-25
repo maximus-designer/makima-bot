@@ -104,7 +104,12 @@ class StickyBot(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message):
         """Repost sticky message when a new message is sent in the channel."""
+        # Ignore messages from the bot itself
         if message.author == self.bot.user:
+            return
+
+        # Ignore DMs
+        if not message.guild:
             return
 
         # Check if the bot has the required permissions before posting
