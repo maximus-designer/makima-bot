@@ -1,37 +1,45 @@
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
-import json
-from datetime import datetime, timedelta
+from pymongo import MongoClient
+from datetime import datetime
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 class ThreadCreatorCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config_file = "thread_config.json"
-        self.guild_configs = {}
-        self.cooldowns = {}
-        self.load_config()
 
-    def load_config(self):
-        """Load configuration from JSON."""
-        try:
-            with open(self.config_file, "r") as f:
-                self.guild_configs = json.load(f)
-        except FileNotFoundError:
-            self.guild_configs = {}
+        # MongoDB setup
+        mongo_uri = os.getenv("MONGO_URL")
+        if not mongo_uri:
+            raise ValueError("MONGO_URL is not set in the environment variables.")
 
-    def save_config(self):
-        """Save configuration to JSON."""
-        with open(self.config_file, "w") as f:
-            json.dump(self.guild_configs, f, indent=4)
+        self.mongo_client = MongoClient(mongo_uri)
+        self.db = self.mongo_client["threads"]  # Database name
+        self.guild_configs = self.db["guild_configs"]  # Collection for guild configurations
+        self.cooldowns = self.db["cooldowns"]  # Collection for cooldown tracking
 
     def is_on_cooldown(self, guild_id, user_id, cooldown):
         """Check if a user is on cooldown."""
-        now = datetime.utcnow().timestamp()
-        last_used = self.cooldowns.get((guild_id, user_id), 0)
-        if now - last_used < cooldown:
-            return True, cooldown - (now - last_used)
-        self.cooldowns[(guild_id, user_id)] = now
+        now = datetime.utcnow()
+        cooldown_entry = self.cooldowns.find_one({"guild_id": guild_id, "user_id": user_id})
+
+        if cooldown_entry:
+            last_used = cooldown_entry["last_used"]
+            time_since_last = (now - last_used).total_seconds()
+            if time_since_last < cooldown:
+                return True, cooldown - time_since_last
+
+        # Update the cooldown time
+        self.cooldowns.update_one(
+            {"guild_id": guild_id, "user_id": user_id},
+            {"$set": {"last_used": now}},
+            upsert=True
+        )
         return False, 0
 
     @commands.Cog.listener()
@@ -41,7 +49,7 @@ class ThreadCreatorCog(commands.Cog):
             return
 
         guild_id, channel_id = str(message.guild.id), str(message.channel.id)
-        config = self.guild_configs.get(guild_id, {}).get(channel_id)
+        config = self.guild_configs.find_one({"guild_id": guild_id, "channel_id": channel_id})
         if not config or not message.attachments:
             return
 
@@ -63,24 +71,29 @@ class ThreadCreatorCog(commands.Cog):
             return
 
         guild_id, channel_id = str(interaction.guild.id), str(channel.id)
-        self.guild_configs.setdefault(guild_id, {})[channel_id] = {"cooldown": cooldown}
-        self.save_config()
+        self.guild_configs.update_one(
+            {"guild_id": guild_id, "channel_id": channel_id},
+            {"$set": {"cooldown": cooldown}},
+            upsert=True
+        )
         await interaction.response.send_message(f"✅ Thread creation enabled in {channel.mention} with {cooldown}s cooldown.", ephemeral=True)
 
     @app_commands.command(name="thread_status", description="Check thread settings for this server.")
     async def thread_status(self, interaction: discord.Interaction):
         """Show all configured channels."""
         guild_id = str(interaction.guild.id)
-        config = self.guild_configs.get(guild_id, {})
-        if not config:
+        config_cursor = self.guild_configs.find({"guild_id": guild_id})
+        configs = list(config_cursor)
+
+        if not configs:
             await interaction.response.send_message("❌ No channels configured.", ephemeral=True)
             return
 
         embed = discord.Embed(title="📊 Thread Configuration", color=discord.Color.blue())
-        for channel_id, settings in config.items():
-            channel = interaction.guild.get_channel(int(channel_id))
+        for config in configs:
+            channel = interaction.guild.get_channel(int(config["channel_id"]))
             if channel:
-                embed.add_field(name=f"#{channel.name}", value=f"Cooldown: {settings['cooldown']}s", inline=False)
+                embed.add_field(name=f"#{channel.name}", value=f"Cooldown: {config['cooldown']}s", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def setup(bot):
