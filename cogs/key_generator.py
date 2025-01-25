@@ -110,7 +110,7 @@ class KeyManagerCog(commands.Cog):
             style=discord.TextStyle.short, 
             required=True, 
             max_length=7, 
-            default="#0000FF"
+            default="#2f3136"
         )
 
         def __init__(self, bot: commands.Bot):
@@ -128,17 +128,25 @@ class KeyManagerCog(commands.Cog):
                     await interaction.response.send_message("Invalid color code. Use #RRGGBB format.", ephemeral=True)
                     return
 
-                if image_url and not self.validate_image_url(image_url):
-                    await interaction.response.send_message("Invalid image URL.", ephemeral=True)
-                    return
-
-                embed = discord.Embed(
-                    title=title, 
-                    description=description, 
-                    color=int(color_hex[1:], 16)
-                )
+                # If an image URL is provided, validate it
                 if image_url:
+                    if not self.validate_image_url(image_url):
+                        await interaction.response.send_message("Invalid image URL.", ephemeral=True)
+                        return
+                    # If the URL is valid, continue with the embed creation
+                    embed = discord.Embed(
+                        title=title, 
+                        description=description, 
+                        color=int(color_hex[1:], 16)
+                    )
                     embed.set_image(url=image_url)
+                else:
+                    # If no image URL, just create the embed without an image
+                    embed = discord.Embed(
+                        title=title, 
+                        description=description, 
+                        color=int(color_hex[1:], 16)
+                    )
 
                 view = KeyManagerCog.KeyActionsView(self.bot)
                 message = await interaction.channel.send(embed=embed, view=view)
@@ -169,8 +177,15 @@ class KeyManagerCog(commands.Cog):
 
         @staticmethod
         def validate_image_url(url: str) -> bool:
-            return url and url.lower().endswith((".jpg", ".png", ".jpeg", ".gif", ".webp"))
-
+            """Validate both external image URLs and Discord attachments."""
+            # Check if URL is a valid image URL (ends with common image extensions)
+            if url.lower().endswith((".jpg", ".png", ".jpeg", ".gif", ".webp")):
+                return True
+            # Check if URL is a Discord attachment link (starts with the Discord CDN link)
+            return url.startswith("https://cdn.discordapp.com/attachments/") and any(
+                url.lower().endswith(ext) for ext in [".jpg", ".png", ".jpeg", ".gif", ".webp"]
+            )
+            
     class KeyActionsView(discord.ui.View):
         def __init__(self, bot: commands.Bot):
             super().__init__(timeout=None)  # No timeout for buttons
@@ -182,7 +197,7 @@ class KeyManagerCog(commands.Cog):
             try:
                 key = self.generate_unique_key()
                 await self.store_key(interaction.user.id, key)
-                await interaction.response.send_message(f"Key: `{key}`", ephemeral=True)
+                await interaction.response.send_message(f"{key}", ephemeral=True)
             except Exception as e:
                 print(f"Key generation error: {e}")
                 await interaction.response.send_message("Failed to generate key.", ephemeral=True)
