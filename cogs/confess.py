@@ -51,10 +51,39 @@ class ConfigManager:
         unique_users = len(self.confessions_collection.distinct("author_id", {"guild_id": guild_id}))
         return total_confessions, unique_users
 
+class ConfessionView(discord.ui.View):
+    def __init__(self, timeout=None):
+        super().__init__(timeout=timeout)
+
+    @discord.ui.button(label="Reply", style=discord.ButtonStyle.secondary, custom_id="confession_reply")
+    async def reply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = ConfessionModal(is_reply=True, original_message_id=interaction.message.id)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Report", style=discord.ButtonStyle.danger, custom_id="confession_report")
+    async def report(self, interaction: discord.Interaction, button: discord.ui.Button):
+        config = ConfigManager()
+        guild_settings = config.get_guild_settings(str(interaction.guild_id))
+        log_channel_id = guild_settings.get('log_channel')
+
+        if log_channel_id:
+            log_channel = interaction.guild.get_channel(int(log_channel_id))
+            if log_channel:
+                report_embed = discord.Embed(
+                    title="Confession Report",
+                    description=f"**Reported Message ID:** {interaction.message.id}\n"
+                              f"**Reported by:** {interaction.user} (ID: {interaction.user.id})\n"
+                              f"**Original Content:**\n{interaction.message.embeds[0].description}",
+                    color=discord.Color.red(),
+                    timestamp=discord.utils.utcnow()
+                )
+                await log_channel.send(embed=report_embed)
+
+        await interaction.response.send_message("Report submitted to moderators.", ephemeral=True)
+
 class ConfessionModal(discord.ui.Modal):
-    def __init__(self, bot, is_reply=False, original_message_id=None):
+    def __init__(self, is_reply=False, original_message_id=None):
         super().__init__(title="Submit a Confession" if not is_reply else "Reply to Confession")
-        self.bot = bot
         self.is_reply = is_reply
         self.original_message_id = original_message_id
 
@@ -96,6 +125,9 @@ class ConfessionModal(discord.ui.Modal):
                 return discord.File(io.BytesIO(data), filename="attachment.png")
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Defer the interaction first
+        await interaction.response.defer(ephemeral=True)
+
         config = ConfigManager()
         guild_settings = config.get_guild_settings(str(interaction.guild_id))
 
@@ -104,16 +136,16 @@ class ConfessionModal(discord.ui.Modal):
         banned_users = guild_settings.get('banned_users', [])
 
         if str(interaction.user.id) in banned_users:
-            await interaction.response.send_message("You are banned from using confessions.", ephemeral=True)
+            await interaction.followup.send("You are banned from using confessions.", ephemeral=True)
             return
 
         if not confession_channel_id:
-            await interaction.response.send_message("Confession channel has not been set up!", ephemeral=True)
+            await interaction.followup.send("Confession channel has not been set up!", ephemeral=True)
             return
 
         confession_channel = interaction.guild.get_channel(int(confession_channel_id))
         if not confession_channel:
-            await interaction.response.send_message("Confession channel not found!", ephemeral=True)
+            await interaction.followup.send("Confession channel not found!", ephemeral=True)
             return
 
         # Download attachment if provided
@@ -133,7 +165,7 @@ class ConfessionModal(discord.ui.Modal):
             embed.set_image(url="attachment://attachment.png")
 
         if not self.is_reply:
-            view = ConfessionView(self.bot)
+            view = ConfessionView()
             message = await confession_channel.send(embed=embed, view=view, file=file)
 
             # Save confession to database
@@ -170,48 +202,37 @@ class ConfessionModal(discord.ui.Modal):
                     log_embed.add_field(name="Attachment", value="Image included", inline=False)
                 await log_channel.send(embed=log_embed)
 
-        await interaction.response.send_message("Your message has been submitted!", ephemeral=True)
-
-class ConfessionView(discord.ui.View):
-    def __init__(self, bot):
-        super().__init__(timeout=None)
-        self.bot = bot
-
-    @discord.ui.button(label="Reply", style=discord.ButtonStyle.secondary, custom_id="confession_reply")
-    async def reply(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = ConfessionModal(self.bot, is_reply=True, original_message_id=interaction.message.id)
-        await interaction.response.send_modal(modal)
-
-    @discord.ui.button(label="Report", style=discord.ButtonStyle.danger, custom_id="confession_report")
-    async def report(self, interaction: discord.Interaction, button: discord.ui.Button):
-        config = ConfigManager()
-        guild_settings = config.get_guild_settings(str(interaction.guild_id))
-        log_channel_id = guild_settings.get('log_channel')
-
-        if log_channel_id:
-            log_channel = interaction.guild.get_channel(int(log_channel_id))
-            if log_channel:
-                report_embed = discord.Embed(
-                    title="Confession Report",
-                    description=f"**Reported Message ID:** {interaction.message.id}\n"
-                              f"**Reported by:** {interaction.user} (ID: {interaction.user.id})\n"
-                              f"**Original Content:**\n{interaction.message.embeds[0].description}",
-                    color=discord.Color.red(),
-                    timestamp=discord.utils.utcnow()
-                )
-                await log_channel.send(embed=report_embed)
-
-        await interaction.response.send_message("Report submitted to moderators.", ephemeral=True)
+        await interaction.followup.send("Your message has been submitted!", ephemeral=True)
 
 class Confessions(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = ConfigManager()
+        bot.add_view(ConfessionView())  # Persistent view registration
+
+    async def cog_load(self):
+        """Restore persistent views when the cog is loaded"""
+        for guild in self.bot.guilds:
+            try:
+                confession_channel_id = self.config.get_guild_settings(str(guild.id)).get('confession_channel')
+                if confession_channel_id:
+                    confession_channel = guild.get_channel(int(confession_channel_id))
+                    if confession_channel:
+                        async for message in confession_channel.history(limit=200):
+                            # Add persistent view to messages with embeds that look like confessions
+                            if message.embeds and len(message.embeds[0].description or "") > 10:
+                                try:
+                                    view = ConfessionView()
+                                    await message.edit(view=view)
+                                except discord.HTTPException:
+                                    print(f"Could not edit message {message.id}")
+            except Exception as e:
+                print(f"Error restoring views for guild {guild.id}: {e}")
 
     @app_commands.command(name="confess")
     async def confess(self, interaction: discord.Interaction):
         """Submit an anonymous confession"""
-        modal = ConfessionModal(self.bot)
+        modal = ConfessionModal()
         await interaction.response.send_modal(modal)
 
     @app_commands.command(name="setconfessionchannel")
