@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import os
+import asyncio
 from typing import Optional
 from datetime import datetime
 import aiohttp
@@ -21,12 +22,10 @@ class ConfigManager:
         self.confessions_collection = self.db['confessions']
 
     def get_guild_settings(self, guild_id: str):
-        # Get guild settings from the database
         guild_settings = self.guild_collection.find_one({"guild_id": guild_id})
         return guild_settings or {}
 
     def update_guild_settings(self, guild_id: str, new_settings: dict):
-        # Update the settings for the given guild
         self.guild_collection.update_one(
             {"guild_id": guild_id},
             {"$set": new_settings},
@@ -34,7 +33,6 @@ class ConfigManager:
         )
 
     def add_confession(self, guild_id: str, message_id: str, author_id: str, title: Optional[str], content: str):
-        # Add confession to database
         confession_data = {
             "guild_id": guild_id,
             "message_id": message_id,
@@ -46,7 +44,6 @@ class ConfigManager:
         self.confessions_collection.insert_one(confession_data)
 
     def get_confession_stats(self, guild_id: str):
-        # Get confession statistics
         total_confessions = self.confessions_collection.count_documents({"guild_id": guild_id})
         unique_users = len(self.confessions_collection.distinct("author_id", {"guild_id": guild_id}))
         return total_confessions, unique_users
@@ -125,7 +122,6 @@ class ConfessionModal(discord.ui.Modal):
                 return discord.File(io.BytesIO(data), filename="attachment.png")
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Defer the interaction first
         await interaction.response.defer(ephemeral=True)
 
         config = ConfigManager()
@@ -164,45 +160,49 @@ class ConfessionModal(discord.ui.Modal):
         if file:
             embed.set_image(url="attachment://attachment.png")
 
-        if not self.is_reply:
-            view = ConfessionView()
-            message = await confession_channel.send(embed=embed, view=view, file=file)
+        try:
+            if not self.is_reply:
+                view = ConfessionView()
+                message = await confession_channel.send(embed=embed, view=view, file=file)
 
-            # Save confession to database
-            config.add_confession(
-                guild_id=str(interaction.guild_id),
-                message_id=str(message.id),
-                author_id=interaction.user.id,
-                title=self.title_input.value,
-                content=self.confession_input.value
-            )
-
-        else:
-            # Handle reply in thread
-            original_message = await confession_channel.fetch_message(self.original_message_id)
-            thread = original_message.thread
-            if not thread:
-                thread = await original_message.create_thread(name="Confession Discussion")
-            await thread.send(embed=embed, file=file)
-
-        # Log the confession
-        if log_channel_id:
-            log_channel = interaction.guild.get_channel(int(log_channel_id))
-            if log_channel:
-                log_embed = discord.Embed(
-                    title="New Confession Log",
-                    description=f"**Author:** {interaction.user} (ID: {interaction.user.id})\n"
-                              f"**Type:** {'Reply' if self.is_reply else 'Original confession'}\n"
-                              f"**Title:** {self.title_input.value or 'None'}\n"
-                              f"**Content:**\n{self.confession_input.value}",
-                    color=discord.Color.blue(),
-                    timestamp=discord.utils.utcnow()
+                # Save confession to database
+                config.add_confession(
+                    guild_id=str(interaction.guild_id),
+                    message_id=str(message.id),
+                    author_id=interaction.user.id,
+                    title=self.title_input.value,
+                    content=self.confession_input.value
                 )
-                if file:
-                    log_embed.add_field(name="Attachment", value="Image included", inline=False)
-                await log_channel.send(embed=log_embed)
 
-        await interaction.followup.send("Your message has been submitted!", ephemeral=True)
+            else:
+                # Handle reply in thread
+                original_message = await confession_channel.fetch_message(self.original_message_id)
+                thread = original_message.thread
+                if not thread:
+                    thread = await original_message.create_thread(name="Confession Discussion")
+                await thread.send(embed=embed, file=file)
+
+            # Log the confession
+            if log_channel_id:
+                log_channel = interaction.guild.get_channel(int(log_channel_id))
+                if log_channel:
+                    log_embed = discord.Embed(
+                        title="New Confession Log",
+                        description=f"**Author:** {interaction.user} (ID: {interaction.user.id})\n"
+                                  f"**Type:** {'Reply' if self.is_reply else 'Original confession'}\n"
+                                  f"**Title:** {self.title_input.value or 'None'}\n"
+                                  f"**Content:**\n{self.confession_input.value}",
+                        color=discord.Color.blue(),
+                        timestamp=discord.utils.utcnow()
+                    )
+                    if file:
+                        log_embed.add_field(name="Attachment", value="Image included", inline=False)
+                    await log_channel.send(embed=log_embed)
+
+            await interaction.followup.send("Your message has been submitted!", ephemeral=True)
+
+        except discord.HTTPException as e:
+            await interaction.followup.send(f"Failed to submit confession: {str(e)}", ephemeral=True)
 
 class Confessions(commands.Cog):
     def __init__(self, bot):
@@ -214,18 +214,35 @@ class Confessions(commands.Cog):
         """Restore persistent views when the cog is loaded"""
         for guild in self.bot.guilds:
             try:
-                confession_channel_id = self.config.get_guild_settings(str(guild.id)).get('confession_channel')
-                if confession_channel_id:
-                    confession_channel = guild.get_channel(int(confession_channel_id))
-                    if confession_channel:
-                        async for message in confession_channel.history(limit=200):
-                            # Add persistent view to messages with embeds that look like confessions
-                            if message.embeds and len(message.embeds[0].description or "") > 10:
-                                try:
-                                    view = ConfessionView()
-                                    await message.edit(view=view)
-                                except discord.HTTPException:
-                                    print(f"Could not edit message {message.id}")
+                guild_settings = self.config.get_guild_settings(str(guild.id))
+                confession_channel_id = guild_settings.get('confession_channel')
+                
+                if not confession_channel_id:
+                    continue
+
+                confession_channel = guild.get_channel(int(confession_channel_id))
+                if not confession_channel:
+                    continue
+
+                # Use a lower limit and add exponential backoff
+                processed_messages = 0
+                async for message in confession_channel.history(limit=30):
+                    if message.embeds and message.embeds[0].description and len(message.embeds[0].description) > 10:
+                        try:
+                            view = ConfessionView()
+                            await message.edit(view=view)
+                            processed_messages += 1
+                            
+                            # Implement exponential backoff
+                            if processed_messages % 5 == 0:
+                                await asyncio.sleep(2)
+                        
+                        except discord.HTTPException as e:
+                            print(f"Rate limit or error editing message {message.id}: {e}")
+                            await asyncio.sleep(5)  # Longer sleep on rate limit
+                        except Exception as e:
+                            print(f"Unexpected error with message {message.id}: {e}")
+
             except Exception as e:
                 print(f"Error restoring views for guild {guild.id}: {e}")
 
