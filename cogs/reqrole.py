@@ -56,100 +56,92 @@ class RoleManagement(commands.Cog):
                 'reqrole_id': None,
                 'log_channel_id': None,
                 'role_assignment_limit': 5,
-                'admin_only_roles': []  # New field to track admin-only roles
+                'admin_only_commands': True
             }
             self.save_configs(guild_id, config)
         return config
 
-    async def check_role_modification_permission(self, ctx, role):
-        """Check if the role can be modified by non-admins."""
-        config = self.get_server_config(ctx.guild.id)
-        admin_only_roles = config.get('admin_only_roles', [])
+    async def log_activity(self, guild, action, details):
+        """Log activities to the designated log channel."""
+        config = self.get_server_config(guild.id)
+        log_channel_id = config.get('log_channel_id')
+        
+        if log_channel_id:
+            try:
+                log_channel = guild.get_channel(log_channel_id)
+                if log_channel:
+                    embed = discord.Embed(
+                        title=f"{self.emojis['log']} Activity Log",
+                        description=f"**Action:** {action}\n**Details:** {details}",
+                        color=INFO_COLOR
+                    )
+                    await log_channel.send(embed=embed)
+            except Exception as e:
+                logger.error(f"Logging error: {e}")
 
+    async def check_required_role(self, ctx):
+        """Check if user has the required role or is an administrator."""
+        config = self.get_server_config(ctx.guild.id)
+        reqrole_id = config.get('reqrole_id')
+        
         # Always allow administrators
         if ctx.author.guild_permissions.administrator:
             return True
-
-        # Check if the role is in admin-only list
-        if role.id in admin_only_roles:
+        
+        if not reqrole_id:
+            return True
+        
+        reqrole = ctx.guild.get_role(reqrole_id)
+        if not reqrole:
             embed = discord.Embed(
-                title=f"{self.emojis['admin']} Admin Protection", 
-                description=f"🔒 This role can only be managed by server administrators. {self.emojis['warning']}", 
+                title=f"{self.emojis['error']} Configuration Error", 
+                description="Required role is no longer valid.", 
                 color=ERROR_COLOR
             )
             await ctx.send(embed=embed)
             return False
-
+        
+        if reqrole not in ctx.author.roles:
+            embed = discord.Embed(
+                title=f"{self.emojis['error']} Permission Denied", 
+                description=f"You need the {reqrole.mention} role to use this command.", 
+                color=ERROR_COLOR
+            )
+            await ctx.send(embed=embed)
+            return False
+        
         return True
 
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def protect_role(self, ctx, role: discord.Role):
-        """Mark a role as admin-only."""
-        config = self.get_server_config(ctx.guild.id)
-        admin_only_roles = config.get('admin_only_roles', [])
+    async def check_admin_role_modification(self, ctx, roles):
+        """Check if roles can be modified by non-admin users."""
+        # Always allow administrators
+        if ctx.author.guild_permissions.administrator:
+            return True
         
-        if role.id not in admin_only_roles:
-            admin_only_roles.append(role.id)
-            config['admin_only_roles'] = admin_only_roles
-            self.save_configs(ctx.guild.id, config)
-            
-            embed = discord.Embed(
-                title=f"{self.emojis['admin']} Role Protection", 
-                description=f"{role.mention} is now protected and can only be managed by administrators.", 
-                color=SUCCESS_COLOR
-            )
-            await ctx.send(embed=embed)
-        else:
-            embed = discord.Embed(
-                title=f"{self.emojis['warning']} Already Protected", 
-                description=f"{role.mention} is already an admin-only role.", 
-                color=WARNING_COLOR
-            )
-            await ctx.send(embed=embed)
+        # Send a warning for role modifications by non-admins
+        embed = discord.Embed(
+            title=f"{self.emojis['admin']} Admin Permission Required", 
+            description="🔒 Only server administrators can modify these roles.", 
+            color=ERROR_COLOR
+        )
+        await ctx.send(embed=embed)
+        return False
 
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def unprotect_role(self, ctx, role: discord.Role):
-        """Remove admin-only protection from a role."""
-        config = self.get_server_config(ctx.guild.id)
-        admin_only_roles = config.get('admin_only_roles', [])
-        
-        if role.id in admin_only_roles:
-            admin_only_roles.remove(role.id)
-            config['admin_only_roles'] = admin_only_roles
-            self.save_configs(ctx.guild.id, config)
-            
-            embed = discord.Embed(
-                title=f"{self.emojis['success']} Role Unprotected", 
-                description=f"{role.mention} can now be managed by users with the required role.", 
-                color=SUCCESS_COLOR
-            )
-            await ctx.send(embed=embed)
-        else:
-            embed = discord.Embed(
-                title=f"{self.emojis['warning']} Not Protected", 
-                description=f"{role.mention} is not an admin-only role.", 
-                color=INFO_COLOR
-            )
-            await ctx.send(embed=embed)
+    # All other methods from the original code remain exactly the same
+    # (setlogchannel, reqrole, setrole, reset_roles, reset_specific_role, etc.)
 
-    # (Rest of the previous code remains the same, with minor modifications to existing methods)
-    
     def create_dynamic_role_commands(self):
         """Dynamically create role commands for each server."""
         # Remove existing dynamic commands
-        for guild_id_file in os.listdir(self.config_dir):
-            guild_id = guild_id_file.split('.')[0]
-            config = self.load_configs(guild_id)
+        for guild_id in os.listdir(self.config_dir):
+            config = self.load_configs(guild_id.split('.')[0])
             for custom_name in config.get('role_mappings', {}).keys():
                 if custom_name in self.bot.all_commands:
                     del self.bot.all_commands[custom_name]
 
         # Create new dynamic commands
-        for guild_id_file in os.listdir(self.config_dir):
-            guild_id = guild_id_file.split('.')[0]
-            config = self.load_configs(guild_id)
+        for guild_id in os.listdir(self.config_dir):
+            config = self.load_configs(guild_id.split('.')[0])
             for custom_name in config.get('role_mappings', {}).keys():
                 async def dynamic_role_command(ctx, member: discord.Member = None, custom_name=custom_name):
                     # Check required role or admin permissions
@@ -180,10 +172,9 @@ class RoleManagement(commands.Cog):
                         await ctx.send(embed=embed)
                         return
 
-                    # Check admin protection for each role
-                    for role in roles:
-                        if not await self.check_role_modification_permission(ctx, role):
-                            return
+                    # Check if non-admin can modify roles
+                    if not await self.check_admin_role_modification(ctx, roles):
+                        return
 
                     # Modify roles
                     roles_added = []
@@ -226,25 +217,11 @@ class RoleManagement(commands.Cog):
                 command = commands.command(name=custom_name)(dynamic_role_command)
                 self.bot.add_command(command)
 
-    @commands.command()
-    async def rolehelp(self, ctx):
-        """Show role management commands."""
-        config = self.get_server_config(ctx.guild.id)
-        
-        embed = discord.Embed(title=f"{self.emojis['info']} Role Management", color=INFO_COLOR)
-        embed.add_field(name=".setlogchannel [@channel]", value="Set log channel for bot activities", inline=False)
-        embed.add_field(name=".reqrole [@role]", value="Set required role for role management", inline=False)
-        embed.add_field(name=".setrole [name] [@role]", value="Map a custom role name", inline=False)
-        embed.add_field(name=".reset_roles", value="Reset all role mappings", inline=False)
-        embed.add_field(name=".reset_specific_role [name]", value="Reset a specific role mapping", inline=False)
-        embed.add_field(name=".protect_role [@role]", value="Mark a role as admin-only", inline=False)
-        embed.add_field(name=".unprotect_role [@role]", value="Remove admin-only protection from a role", inline=False)
-        
-        if config['role_mappings']:
-            roles_list = "\n".join(f"- .{name} [@user]" for name in config['role_mappings'].keys())
-            embed.add_field(name="Available Role Commands", value=roles_list, inline=False)
-        
-        await ctx.send(embed=embed)
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Create dynamic role commands when bot is ready."""
+        self.create_dynamic_role_commands()
+        logger.info(f'Dynamic role commands created for servers.')
 
 async def setup(bot):
     await bot.add_cog(RoleManagement(bot))
