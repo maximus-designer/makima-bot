@@ -211,7 +211,7 @@ class Confessions(commands.Cog):
         bot.add_view(ConfessionView())  # Persistent view registration
 
     async def cog_load(self):
-        """Restore persistent views when the cog is loaded"""
+        """Restore persistent views only for bot-authored messages"""
         for guild in self.bot.guilds:
             try:
                 guild_settings = self.config.get_guild_settings(str(guild.id))
@@ -224,24 +224,32 @@ class Confessions(commands.Cog):
                 if not confession_channel:
                     continue
 
-                # Use a lower limit and add exponential backoff
                 processed_messages = 0
-                async for message in confession_channel.history(limit=30):
-                    if message.embeds and message.embeds[0].description and len(message.embeds[0].description) > 10:
+                async for message in confession_channel.history(limit=50):
+                    # Only process messages sent by the bot
+                    if (message.author == self.bot.user and 
+                        message.embeds and 
+                        message.embeds[0].description and 
+                        len(message.embeds[0].description) > 10):
+                        
                         try:
                             view = ConfessionView()
                             await message.edit(view=view)
                             processed_messages += 1
                             
-                            # Implement exponential backoff
+                            # Exponential backoff
                             if processed_messages % 5 == 0:
                                 await asyncio.sleep(2)
+                            
+                            await asyncio.sleep(0.5)
                         
                         except discord.HTTPException as e:
-                            print(f"Rate limit or error editing message {message.id}: {e}")
-                            await asyncio.sleep(5)  # Longer sleep on rate limit
+                            print(f"Error editing message {message.id}: {e}")
+                            await asyncio.sleep(min(processed_messages * 2, 30))
+                        
                         except Exception as e:
                             print(f"Unexpected error with message {message.id}: {e}")
+                            await asyncio.sleep(1)
 
             except Exception as e:
                 print(f"Error restoring views for guild {guild.id}: {e}")
