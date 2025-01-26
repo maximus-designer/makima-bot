@@ -120,10 +120,19 @@ class RoleManagement(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    async def warn_non_admin(self, ctx):
+        """Warn non-admin users about attempting to use admin commands."""
+        embed = discord.Embed(
+            title=f"{self.emojis['warning']} Restricted Command",
+            description="This command is restricted to administrators only. Please contact a server admin for assistance.",
+            color=WARNING_COLOR
+        )
+        await ctx.send(embed=embed)
+
     async def cog_before_invoke(self, ctx):
         """Hook called before any command invocation."""
         if ctx.command and ctx.command.name in self.bot.all_commands and not ctx.author.guild_permissions.administrator:
-            await self.handle_non_admin_attempt(ctx)
+            await self.warn_non_admin(ctx)
             raise commands.CheckFailure("User does not have admin permissions.")
 
     @commands.command()
@@ -342,13 +351,22 @@ class RoleManagement(commands.Cog):
                     # Log
                     added_names = ', '.join(r.name for r in roles_added)
                     removed_names = ', '.join(r.name for r in roles_removed)
-                    log_details = f"Added: {added_names}; Removed: {removed_names}"
-                    await self.log_activity(ctx.guild, f"Dynamic Role '{custom_name}' Modified", log_details)
+                    log_details = f"Added: {added_names
+                    log_details = f"Added: {added_names}" if added_names else ""
+                    if removed_names:
+                        log_details += f" | Removed: {removed_names}"
 
-                command_name = custom_name.lower()
-                if command_name not in self.bot.all_commands:
-                    self.bot.command(name=command_name)(dynamic_role_command)
+                    await self.log_activity(
+                        ctx.guild,
+                        "Dynamic Role Command",
+                        f"Roles modified for {member.display_name}: {log_details}"
+                    )
 
-# Add the cog to the bot
-async def setup(bot):
-    await bot.add_cog(RoleManagement(bot))
+                # Add the dynamic command to the bot
+                dynamic_role_command.__name__ = custom_name
+                dynamic_command = commands.Command(
+                    name=custom_name,
+                    callback=dynamic_role_command,
+                    help=f"Assign or remove roles mapped to '{custom_name}'."
+                )
+                self.bot.add_command(dynamic_command)
