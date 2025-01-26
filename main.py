@@ -27,7 +27,6 @@ bot = commands.Bot(command_prefix=".", intents=intents)
 cogs = [
     "cogs.status_changer",
     "cogs.dragmee",
-    "cogs.AvatarBannerUpdater",
     "cogs.confess",
     # You can keep adding other cogs as needed
 ]
