@@ -94,6 +94,18 @@ class RoleManagement(commands.Cog):
             f"{ctx.author.name} attempted to use an admin-only command"
         )
 
+    def check_req_role(self, ctx):
+        """Check if the user has the required role."""
+        config = self.get_server_config(ctx.guild.id)
+        reqrole_id = config.get('reqrole_id')
+        
+        # If no required role is set, allow role assignment
+        if reqrole_id is None:
+            return True
+        
+        # If required role is set, check if the user has the role
+        return any(role.id == reqrole_id for role in ctx.author.roles)
+
     @commands.command()
     async def setlogchannel(self, ctx, channel: discord.TextChannel):
         """Set the log channel for server activities."""
@@ -135,8 +147,13 @@ class RoleManagement(commands.Cog):
     @commands.command()
     async def setrole(self, ctx, custom_name: str, role: discord.Role):
         """Map a custom role name to a role."""
-        if not ctx.author.guild_permissions.administrator:
-            return await self.admin_only_command(ctx)
+        if not self.check_req_role(ctx):
+            embed = discord.Embed(
+                title=f"{self.emojis['error']} reqrole Missing", 
+                description="You do not have the required role to assign roles.", 
+                color=ERROR_COLOR
+            )
+            return await ctx.send(embed=embed)
         
         config = self.get_server_config(ctx.guild.id)
         
@@ -163,8 +180,13 @@ class RoleManagement(commands.Cog):
     @commands.command()
     async def reset_role(self, ctx):
         """Reset role mappings with interactive options."""
-        if not ctx.author.guild_permissions.administrator:
-            return await self.admin_only_command(ctx)
+        if not self.check_req_role(ctx):
+            embed = discord.Embed(
+                title=f"{self.emojis['error']} reqrole Missing", 
+                description="You do not have the required role to reset role mappings.", 
+                color=ERROR_COLOR
+            )
+            return await ctx.send(embed=embed)
         
         config = self.get_server_config(ctx.guild.id)
         role_mappings = config.get('role_mappings', {})
