@@ -84,29 +84,31 @@ async def update_message(channel_id, message_id, content):
     await update_queue.put((channel_id, message_id, content))
 
 async def process_queue():
-    """Process message updates from the queue with exponential backoff."""
-    backoff_time = 1  # Initial wait time in seconds
+    """Process message updates from the queue with rate limit handling."""
     while True:
         channel_id, message_id, content = await update_queue.get()
-        try:
-            channel = bot.get_channel(channel_id)
-            if channel:
-                message = await channel.fetch_message(message_id)
-                await message.edit(content=content)
-                logging.info(f"Successfully edited message {message_id}.")
-            await asyncio.sleep(2)  # Delay to respect rate limits
-        except discord.HTTPException as e:
-            logging.warning(f"Failed to edit message {message_id}: {e}")
-            if e.code == 429:  # If rate limited
-                retry_after = e.retry_after
-                logging.warning(f"Rate limited. Retrying in {retry_after:.2f} seconds.")
-                await asyncio.sleep(retry_after)
-                await update_message(channel_id, message_id, content)  # Retry
-                # Apply exponential backoff
-                backoff_time = min(backoff_time * 2, 60)  # Max 60 seconds backoff
-                await asyncio.sleep(backoff_time)
-        finally:
-            update_queue.task_done()
+        success = False
+        while not success:
+            try:
+                channel = bot.get_channel(channel_id)
+                if channel:
+                    message = await channel.fetch_message(message_id)
+                    await message.edit(content=content)
+                    logging.info(f"Successfully edited message {message_id}.")
+                    success = True  # Mark as success
+                await asyncio.sleep(1)  # Delay to respect rate limits
+            except discord.HTTPException as e:
+                if e.code == 429:  # If rate limited
+                    retry_after = e.retry_after
+                    logging.warning(f"Rate limited while editing message {message_id}. Retrying in {retry_after:.2f} seconds.")
+                    await asyncio.sleep(retry_after)
+                else:
+                    logging.error(f"Failed to edit message {message_id}: {e}")
+                    break  # Exit if an unexpected error occurs
+            except Exception as e:
+                logging.error(f"Unexpected error editing message {message_id}: {e}")
+                break  # Exit if an unexpected error occurs
+        update_queue.task_done()
 
 @bot.event
 async def on_ready():
