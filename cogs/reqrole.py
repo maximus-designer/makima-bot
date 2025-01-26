@@ -3,7 +3,6 @@ import logging
 import os
 import json
 from discord.ext import commands
-from discord.ui import Select, View
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,7 +54,7 @@ class RoleManagement(commands.Cog):
                 'role_mappings': {},
                 'reqrole_id': None,
                 'log_channel_id': None,
-                'role_assignment_limit': 5,
+                'role_assignment_limit': 100,
                 'admin_only_commands': True
             }
             self.save_configs(guild_id, config)
@@ -174,82 +173,52 @@ class RoleManagement(commands.Cog):
 
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def reset_role(self, ctx):
-        """Reset specific role mappings or all role mappings."""
+    async def reset_role(self, ctx, custom_name: str = None):
+        """Reset specific role mapping or all role mappings."""
         if not await self.check_required_role(ctx):
             return
         
         config = self.get_server_config(ctx.guild.id)
         role_mappings = config.get('role_mappings', {})
         
-        if not role_mappings:
-            embed = discord.Embed(
-                title=f"{self.emojis['error']} No Role Mappings",
-                description="There are no role mappings to reset.",
-                color=ERROR_COLOR
-            )
-            await ctx.send(embed=embed)
-            return
-
-        class RoleMappingSelect(Select):
-            def __init__(self):
-                options = [
-                    discord.SelectOption(label=name, value=name)
-                    for name in role_mappings.keys()
-                ]
-                super().__init__(placeholder="Select a role mapping to reset...", min_values=1, max_values=1, options=options)
-
-            async def callback(self, interaction: discord.Interaction):
-                custom_name = self.values[0]
+        if custom_name:
+            # Remove specific role mapping
+            if custom_name in role_mappings:
+                del role_mappings[custom_name]
+                self.save_configs(ctx.guild.id, config)
                 embed = discord.Embed(
-                    title=f"{self.emojis['warning']} Reset Role Mapping",
-                    description=f"Are you sure you want to reset the '{custom_name}' role mapping?",
-                    color=ERROR_COLOR
-                )
-                await interaction.response.send_message(embed=embed, view=ConfirmResetView(ctx, custom_name))
-
-        class ConfirmResetView(View):
-            def __init__(self, ctx, custom_name):
-                super().__init__()
-                self.ctx = ctx
-                self.custom_name = custom_name
-
-            @discord.ui.button(label="Confirm", style=discord.ButtonStyle.red)
-            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-                config = self.ctx.bot.get_server_config(self.ctx.guild.id)
-                del config['role_mappings'][self.custom_name]
-                self.ctx.bot.save_configs(self.ctx.guild.id, config)
-
-                embed = discord.Embed(
-                    title=f"{self.ctx.bot.emojis['success']} Role Mapping Reset",
-                    description=f"Role mapping '{self.custom_name}' has been reset.",
+                    title=f"{self.emojis['success']} Role Mapping Reset",
+                    description=f"Role mapping '{custom_name}' has been reset.",
                     color=SUCCESS_COLOR
                 )
-                await interaction.response.send_message(embed=embed)
-                await self.ctx.bot.log_activity(self.ctx.guild, "Role Mapping Reset", f"'{self.custom_name}' role mapping cleared.")
-                self.stop()
-
-            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
-            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                await ctx.send(embed=embed)
+                await self.log_activity(ctx.guild, "Role Mapping Reset", f"'{custom_name}' role mapping cleared.")
+            else:
                 embed = discord.Embed(
-                    title=f"{self.ctx.bot.emojis['info']} Reset Cancelled",
-                    description="The reset action has been cancelled.",
-                    color=INFO_COLOR
+                    title=f"{self.emojis['error']} Mapping Not Found",
+                    description=f"Role mapping '{custom_name}' was not found.",
+                    color=ERROR_COLOR
                 )
-                await interaction.response.send_message(embed=embed)
-                self.stop()
-
-        # Provide options to select a role mapping to reset
-        select_menu = RoleMappingSelect()
-        view = View()
-        view.add_item(select_menu)
-        
-        embed = discord.Embed(
-            title=f"{self.emojis['warning']} Select Role Mapping to Reset",
-            description="Select the role mapping you want to reset or cancel.",
-            color=INFO_COLOR
-        )
-        await ctx.send(embed=embed, view=view)
+                await ctx.send(embed=embed)
+        else:
+            # Remove all role mappings
+            if role_mappings:
+                role_mappings.clear()
+                self.save_configs(ctx.guild.id, config)
+                embed = discord.Embed(
+                    title=f"{self.emojis['success']} All Role Mappings Reset",
+                    description="All role mappings have been cleared.",
+                    color=SUCCESS_COLOR
+                )
+                await ctx.send(embed=embed)
+                await self.log_activity(ctx.guild, "All Role Mappings Reset", "All role mappings have been cleared.")
+            else:
+                embed = discord.Embed(
+                    title=f"{self.emojis['error']} No Role Mappings",
+                    description="There are no role mappings to reset.",
+                    color=ERROR_COLOR
+                )
+                await ctx.send(embed=embed)
 
     def create_dynamic_role_commands(self):
         """Dynamically create role commands for each server."""
