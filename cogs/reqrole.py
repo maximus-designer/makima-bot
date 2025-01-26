@@ -3,6 +3,7 @@ import logging
 import os
 import json
 from discord.ext import commands
+from discord.ui import Select, View
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -111,25 +112,10 @@ class RoleManagement(commands.Cog):
         
         return True
 
-    async def check_admin_permissions(self, ctx):
-        """Check if the user is an administrator."""
-        if not ctx.author.guild_permissions.administrator:
-            embed = discord.Embed(
-                title=f"{self.emojis['error']} Permission Denied", 
-                description="You need to be an administrator to use this command.", 
-                color=ERROR_COLOR
-            )
-            await ctx.send(embed=embed)
-            return False
-        return True
-
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setlogchannel(self, ctx, channel: discord.TextChannel):
         """Set the log channel for server activities."""
-        if not await self.check_admin_permissions(ctx):
-            return
-
         config = self.get_server_config(ctx.guild.id)
         config['log_channel_id'] = channel.id
         self.save_configs(ctx.guild.id, config)
@@ -147,9 +133,6 @@ class RoleManagement(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def reqrole(self, ctx, role: discord.Role):
         """Set the required role for role management commands."""
-        if not await self.check_admin_permissions(ctx):
-            return
-
         config = self.get_server_config(ctx.guild.id)
         config['reqrole_id'] = role.id
         self.save_configs(ctx.guild.id, config)
@@ -167,9 +150,6 @@ class RoleManagement(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def setrole(self, ctx, custom_name: str, role: discord.Role):
         """Map a custom role name to a role."""
-        if not await self.check_admin_permissions(ctx):
-            return
-
         config = self.get_server_config(ctx.guild.id)
         
         if custom_name not in config['role_mappings']:
@@ -194,53 +174,81 @@ class RoleManagement(commands.Cog):
 
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def reset_roles(self, ctx):
-        """Reset all role mappings for the server."""
-        if not await self.check_admin_permissions(ctx):
+    async def reset_role(self, ctx):
+        """Reset specific role mappings or all role mappings."""
+        if not await self.check_required_role(ctx):
+            return
+        
+        config = self.get_server_config(ctx.guild.id)
+        role_mappings = config.get('role_mappings', {})
+        
+        if not role_mappings:
+            embed = discord.Embed(
+                title=f"{self.emojis['error']} No Role Mappings",
+                description="There are no role mappings to reset.",
+                color=ERROR_COLOR
+            )
+            await ctx.send(embed=embed)
             return
 
-        class ConfirmView(discord.ui.View):
-            def __init__(self, ctx, cog):
+        class RoleMappingSelect(Select):
+            def __init__(self):
+                options = [
+                    discord.SelectOption(label=name, value=name)
+                    for name in role_mappings.keys()
+                ]
+                super().__init__(placeholder="Select a role mapping to reset...", min_values=1, max_values=1, options=options)
+
+            async def callback(self, interaction: discord.Interaction):
+                custom_name = self.values[0]
+                embed = discord.Embed(
+                    title=f"{self.emojis['warning']} Reset Role Mapping",
+                    description=f"Are you sure you want to reset the '{custom_name}' role mapping?",
+                    color=ERROR_COLOR
+                )
+                await interaction.response.send_message(embed=embed, view=ConfirmResetView(ctx, custom_name))
+
+        class ConfirmResetView(View):
+            def __init__(self, ctx, custom_name):
                 super().__init__()
                 self.ctx = ctx
-                self.cog = cog
+                self.custom_name = custom_name
 
-            @discord.ui.button(label="Confirm Reset", style=discord.ButtonStyle.red)
+            @discord.ui.button(label="Confirm", style=discord.ButtonStyle.red)
             async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-                config = self.cog.get_server_config(self.ctx.guild.id)
-                config['role_mappings'] = {}
-                self.cog.save_configs(self.ctx.guild.id, config)
-                
-                # Remove all dynamic commands
-                self.cog.create_dynamic_role_commands()
-                
+                config = self.ctx.bot.get_server_config(self.ctx.guild.id)
+                del config['role_mappings'][self.custom_name]
+                self.ctx.bot.save_configs(self.ctx.guild.id, config)
+
                 embed = discord.Embed(
-                    title=f"{self.cog.emojis['warning']} Role Mappings Reset", 
-                    description="All role mappings have been cleared.", 
+                    title=f"{self.ctx.bot.emojis['success']} Role Mapping Reset",
+                    description=f"Role mapping '{self.custom_name}' has been reset.",
                     color=SUCCESS_COLOR
                 )
                 await interaction.response.send_message(embed=embed)
-                
-                await self.cog.log_activity(self.ctx.guild, "Role Mapping Reset", "All role mappings cleared")
-                
+                await self.ctx.bot.log_activity(self.ctx.guild, "Role Mapping Reset", f"'{self.custom_name}' role mapping cleared.")
                 self.stop()
 
             @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
             async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
                 embed = discord.Embed(
-                    title=f"{self.cog.emojis['error']} Reset Cancelled", 
-                    description="Role mapping reset was cancelled.", 
-                    color=ERROR_COLOR
+                    title=f"{self.ctx.bot.emojis['info']} Reset Cancelled",
+                    description="The reset action has been cancelled.",
+                    color=INFO_COLOR
                 )
                 await interaction.response.send_message(embed=embed)
                 self.stop()
 
+        # Provide options to select a role mapping to reset
+        select_menu = RoleMappingSelect()
+        view = View()
+        view.add_item(select_menu)
+        
         embed = discord.Embed(
-            title=f"{self.emojis['warning']} Reset Role Mappings", 
-            description="Are you sure you want to reset all role mappings for this server?", 
-            color=ERROR_COLOR
+            title=f"{self.emojis['warning']} Select Role Mapping to Reset",
+            description="Select the role mapping you want to reset or cancel.",
+            color=INFO_COLOR
         )
-        view = ConfirmView(ctx, self)
         await ctx.send(embed=embed, view=view)
 
     def create_dynamic_role_commands(self):
@@ -316,38 +324,33 @@ class RoleManagement(commands.Cog):
                     # Log the activity
                     action_type = "Added" if roles_added else "Removed"
                     roles_list = roles_added or roles_removed
-                    await self.log_activity(
-                        ctx.guild, 
-                        f"Role {action_type}", 
-                        f"{member.name} {action_type.lower()} roles: {', '.join(r.name for r in roles_list)}"
-                    )
+                    await self.log_activity(ctx.guild, f"Role {action_type}", f"'{', '.join(r.name for r in roles_list)}' for '{custom_name}'")
 
-                # Dynamically create the command
-                command = commands.command(name=custom_name)(dynamic_role_command)
-                self.bot.add_command(command)
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        """Create dynamic role commands when bot is ready."""
-        self.create_dynamic_role_commands()
-        logger.info(f'Dynamic role commands created for servers.')
+                dynamic_command = commands.Command(dynamic_role_command)
+                self.bot.add_command(dynamic_command)
 
     @commands.command()
-    async def rolehelp(self, ctx):
-        """Show role management commands."""
+    async def list_roles(self, ctx):
+        """List all available custom role mappings."""
         config = self.get_server_config(ctx.guild.id)
+        role_mappings = config.get('role_mappings', {})
         
-        embed = discord.Embed(title=f"{self.emojis['info']} Role Management", color=INFO_COLOR)
-        embed.add_field(name=".setlogchannel [@channel]", value="Set log channel for bot activities", inline=False)
-        embed.add_field(name=".reqrole [@role]", value="Set required role for role management", inline=False)
-        embed.add_field(name=".setrole [name] [@role]", value="Map a custom role name", inline=False)
-        embed.add_field(name=".reset_roles", value="Reset all role mappings", inline=False)
+        if not role_mappings:
+            embed = discord.Embed(
+                title=f"{self.emojis['error']} No Role Mappings",
+                description="There are no custom role mappings.",
+                color=ERROR_COLOR
+            )
+            await ctx.send(embed=embed)
+            return
         
-        if config['role_mappings']:
-            roles_list = "\n".join(f"- .{name} [@user]" for name in config['role_mappings'].keys())
-            embed.add_field(name="Available Role Commands", value=roles_list, inline=False)
-        
+        description = "\n".join([f"• {name}" for name in role_mappings.keys()])
+        embed = discord.Embed(
+            title=f"{self.emojis['roles']} Custom Role Mappings",
+            description=description,
+            color=INFO_COLOR
+        )
         await ctx.send(embed=embed)
 
-async def setup(bot):
-    await bot.add_cog(RoleManagement(bot))
+def setup(bot):
+    bot.add_cog(RoleManagement(bot))
