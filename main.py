@@ -28,6 +28,17 @@ cogs = [
     "cogs.status_changer",
     "cogs.dragmee",
     "cogs.confess",
+    "cogs.afk_cog",
+    "cogs.av",
+    "cogs.giveaway",
+    "cogs.key_generator",
+    "cogs.purge",
+    "cogs.reqrole",
+    "cogs.stats",
+    "cogs.steal",
+    "cogs.sticky",
+    "cogs.thread",
+    "cogs.AvatarBannerUpdater",
     # You can keep adding other cogs as needed
 ]
 
