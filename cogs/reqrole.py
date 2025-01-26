@@ -4,7 +4,6 @@ import os
 from discord.ext import commands
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
-from bson.objectid import ObjectId
 import dotenv
 
 # Setting up logging
@@ -19,166 +18,163 @@ EMBED_COLOR = 0x2f2136  # Constant embed color
 class RoleManagement(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.mongo_client = None
-        self.database = None
-        self.role_collection = None
-        
-        # Connection parameters
         self.mongo_url = os.getenv('MONGO_URL')
-        if not self.mongo_url:
-            logger.error("MONGO_URL environment variable is not set!")
-        
-        # Initialize MongoDB connection
-        self.connect_to_mongodb()
-
-    def connect_to_mongodb(self):
-        """Establish connection to MongoDB."""
-        try:
-            # Use AsyncIOMotorClient for async operations
-            self.mongo_client = AsyncIOMotorClient(self.mongo_url)
-            
-            # For admin operations, use synchronous PyMongo client
-            self.sync_client = MongoClient(self.mongo_url)
-            
-            logger.info("Successfully connected to MongoDB")
-        except Exception as e:
-            logger.error(f"MongoDB connection error: {e}")
-            raise
+        self.mongo_client = AsyncIOMotorClient(self.mongo_url) if self.mongo_url else None
+        self.server_configs = {}
 
     async def get_server_config(self, guild_id):
         """Retrieve or create server-specific configuration."""
-        server_config = await self.role_collection.find_one({'guild_id': guild_id})
-        if not server_config:
-            server_config = {
+        if not self.mongo_client:
+            return None
+
+        database = self.mongo_client[f"role_management_{guild_id}"]
+        collection = database['server_config']
+        
+        config = await collection.find_one({'guild_id': guild_id})
+        if not config:
+            config = {
                 'guild_id': guild_id,
                 'reqrole_id': None,
                 'role_mappings': {},
                 'log_channel_id': None,
                 'role_assignment_limit': 5
             }
-            await self.role_collection.insert_one(server_config)
-        return server_config
-
-    async def update_server_config(self, guild_id, update_data):
-        """Update server-specific configuration."""
-        await self.role_collection.update_one(
-            {'guild_id': guild_id}, 
-            {'$set': update_data}
-        )
+            await collection.insert_one(config)
+        
+        self.server_configs[guild_id] = {
+            'collection': collection,
+            'config': config
+        }
+        return config
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # Set up database for each guild the bot is in
+        """Initialize configurations for all guilds."""
         for guild in self.bot.guilds:
-            database_name = f"role_management_{guild.id}"
-            self.database = self.mongo_client[database_name]
-            self.role_collection = self.database['server_configs']
-            
-            # Initialize configuration for each server
             await self.get_server_config(guild.id)
-        
         logger.info(f'Logged in as {self.bot.user}')
+        self.generate_role_commands()
 
-    @commands.command()
-    async def setreqrole(self, ctx, role: discord.Role):
-        """Set the required role for assigning/removing roles."""
-        if not ctx.author.guild_permissions.administrator:
-            await ctx.send(embed=discord.Embed(description="<:sukoon_info:1323251063910043659> | You do not have permission to use this command.", color=EMBED_COLOR))
+    def generate_role_commands(self):
+        """Dynamically generate role commands based on server configurations."""
+        for guild_id, server_data in self.server_configs.items():
+            role_mappings = server_data['config'].get('role_mappings', {})
+            
+            for custom_name in role_mappings.keys():
+                # Dynamically create a command for each custom role
+                async def role_command(ctx, member: discord.Member = None, custom_name=custom_name):
+                    await self.assign_role(ctx, custom_name, member)
+                
+                # Set the command name and add it to the bot
+                role_command.name = custom_name
+                role_command = commands.command(name=custom_name)(role_command)
+                self.bot.add_command(role_command)
+
+    async def assign_role(self, ctx, custom_name, member=None):
+        """Assign or remove a role."""
+        # Verify server configuration exists
+        server_config = self.server_configs.get(ctx.guild.id)
+        if not server_config:
+            await ctx.send("Server configuration not found.")
             return
-        
-        await self.update_server_config(ctx.guild.id, {'reqrole_id': role.id})
-        logger.info(f'Required role set to {role.name} for guild {ctx.guild.id}.')
-        await ctx.send(embed=discord.Embed(description=f"Required role set to {role.name}.", color=EMBED_COLOR))
 
-    @commands.command()
-    async def reset_mappings(self, ctx):
-        """Reset all role mappings for the current server."""
-        if not ctx.author.guild_permissions.administrator:
-            await ctx.send(embed=discord.Embed(description="<:sukoon_info:1323251063910043659> | You do not have permission to use this command.", color=EMBED_COLOR))
+        # Check for required role
+        config = server_config['config']
+        if config['reqrole_id']:
+            reqrole = discord.utils.get(ctx.author.roles, id=config['reqrole_id'])
+            if not reqrole:
+                await ctx.send("You do not have the required role.")
+                return
+
+        # Validate member
+        if not member:
+            await ctx.send("Please mention a user.")
             return
+
+        # Get role mappings
+        role_mappings = config.get('role_mappings', {})
+        if custom_name not in role_mappings:
+            await ctx.send(f"No role mapped to '{custom_name}'.")
+            return
+
+        # Get roles to modify
+        role_ids = role_mappings[custom_name]
+        roles_to_modify = [ctx.guild.get_role(role_id) for role_id in role_ids if ctx.guild.get_role(role_id)]
+
+        if not roles_to_modify:
+            await ctx.send("No valid roles found for this mapping.")
+            return
+
+        # Check role hierarchy
+        if any(role.position >= ctx.guild.me.top_role.position for role in roles_to_modify):
+            await ctx.send("Cannot modify roles higher than my top role.")
+            return
+
+        # Determine action
+        roles_to_add = []
+        roles_to_remove = []
+        for role in roles_to_modify:
+            if role in member.roles:
+                roles_to_remove.append(role)
+            else:
+                roles_to_add.append(role)
+
+        # Modify roles
+        if roles_to_add:
+            await member.add_roles(*roles_to_add)
+            await ctx.send(f"Added {', '.join(role.name for role in roles_to_add)} to {member.name}")
         
-        await self.update_server_config(ctx.guild.id, {
-            'role_mappings': {},
-            'reqrole_id': None,
-            'log_channel_id': None,
-            'role_assignment_limit': 5
-        })
-        
-        await ctx.send(embed=discord.Embed(description="<a:sukoon_whitetick:1323992464058482729> | All role mappings have been reset.", color=EMBED_COLOR))
+        if roles_to_remove:
+            await member.remove_roles(*roles_to_remove)
+            await ctx.send(f"Removed {', '.join(role.name for role in roles_to_remove)} from {member.name}")
 
     @commands.command()
+    @commands.has_permissions(administrator=True)
     async def setrole(self, ctx, custom_name: str, role: discord.Role):
-        """Map a custom role name to an existing role."""
-        if not ctx.author.guild_permissions.administrator:
-            await ctx.send(embed=discord.Embed(description="<:sukoon_info:1323251063910043659> | You do not have permission to use this command.", color=EMBED_COLOR))
+        """Map a custom role name to a role."""
+        server_config = self.server_configs.get(ctx.guild.id)
+        if not server_config:
+            await ctx.send("Server configuration not found.")
             return
 
-        server_config = await self.get_server_config(ctx.guild.id)
-        role_mappings = server_config.get('role_mappings', {})
-        
-        # Allow multiple mappings for a single custom name
+        collection = server_config['collection']
+        config = server_config['config']
+
+        # Update role mappings
+        role_mappings = config.get('role_mappings', {})
         if custom_name not in role_mappings:
             role_mappings[custom_name] = []
         
-        # Add role ID if not already present
         if role.id not in role_mappings[custom_name]:
             role_mappings[custom_name].append(role.id)
+
+        # Update configuration
+        await collection.update_one(
+            {'guild_id': ctx.guild.id},
+            {'$set': {'role_mappings': role_mappings}}
+        )
+
+        # Regenerate commands
+        self.generate_role_commands()
+
+        await ctx.send(f"Mapped '{custom_name}' to {role.name}")
+
+    @commands.command()
+    async def rolehelp(self, ctx):
+        """Show role management commands."""
+        embed = discord.Embed(title="Role Management Commands", color=EMBED_COLOR)
+        embed.add_field(name=".setrole [custom_name] [@role]", value="Map a custom name to a role", inline=False)
+        embed.add_field(name=".[custom_name] [@user]", value="Assign/remove mapped role", inline=False)
         
-        await self.update_server_config(ctx.guild.id, {'role_mappings': role_mappings})
+        # Add dynamically generated role commands
+        config = self.server_configs.get(ctx.guild.id, {}).get('config', {})
+        role_mappings = config.get('role_mappings', {})
         
-        logger.info(f'Mapped custom role name "{custom_name}" to role {role.name}.')
-        await ctx.send(embed=discord.Embed(description=f"<a:sukoon_whitetick:1323992464058482729> | Mapped custom role name \"{custom_name}\" to role {role.name}.", color=EMBED_COLOR))
-
-    async def assign_or_remove_role(self, ctx, custom_name: str, member: discord.Member):
-        """Assign or remove the mapped custom roles from a user."""
-        server_config = await self.get_server_config(ctx.guild.id)
-        role_mappings = server_config.get('role_mappings', {})
+        if role_mappings:
+            mapped_roles = "\n".join(f"- .{name}" for name in role_mappings.keys())
+            embed.add_field(name="Available Role Commands", value=mapped_roles, inline=False)
         
-        if custom_name not in role_mappings:
-            await ctx.send(embed=discord.Embed(description=f"<:sukoon_info:1323251063910043659> | No role mapped to '{custom_name}'. Please map a role first.", color=EMBED_COLOR))
-            return
-
-        role_ids = role_mappings[custom_name]
-        roles = [discord.utils.get(ctx.guild.roles, id=role_id) for role_id in role_ids]
-        
-        # Remove invalid roles
-        roles = [role for role in roles if role]
-        
-        if not roles:
-            await ctx.send(embed=discord.Embed(description=f"<:sukoon_info:1323251063910043659> | The roles mapped to '{custom_name}' no longer exist.", color=EMBED_COLOR))
-            return
-
-        # Check role hierarchy permissions
-        if any(role.position >= ctx.guild.me.top_role.position for role in roles):
-            await ctx.send(embed=discord.Embed(description=f"<:sukoon_info:1323251063910043659> | I cannot assign/remove one or more roles as they are higher than or equal to my top role.", color=EMBED_COLOR))
-            return
-
-        # Check role assignment limit
-        user_custom_roles = [role for role in member.roles if any(role.id in mapping for mapping in role_mappings.values())]
-        role_limit = server_config.get('role_assignment_limit', 5)
-        
-        if len(user_custom_roles) >= role_limit:
-            await ctx.send(embed=discord.Embed(description=f"<:sukoon_info:1323251063910043659> | {member.mention} already has the maximum number of custom roles ({role_limit}).", color=EMBED_COLOR))
-            return
-
-        # Determine action (assign or remove)
-        roles_to_modify = []
-        action = ""
-        for role in roles:
-            if role in member.roles:
-                roles_to_modify.append(role)
-                action = "removed"
-            else:
-                roles_to_modify.append(role)
-                action = "assigned"
-
-        if roles_to_modify:
-            await member.add_roles(*roles_to_modify) if action == "assigned" else await member.remove_roles(*roles_to_modify)
-            
-            roles_names = ", ".join(role.name for role in roles_to_modify)
-            await ctx.send(embed=discord.Embed(description=f"<a:sukoon_whitetick:1323992464058482729> | Successfully {action} the {roles_names} role(s) to {member.mention}.", color=EMBED_COLOR))
-
-    # Other methods remain largely the same, just update to use async MongoDB methods
+        await ctx.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(RoleManagement(bot))
