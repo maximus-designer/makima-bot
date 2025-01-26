@@ -17,10 +17,8 @@ WARNING_COLOR = 0xf39c12
 class RoleManagement(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config_file = 'server_roles_database.json'
-        self.server_configs = self.load_configs()
-        
-        # Emoji dictionary for interactive responses
+        self.config_dir = 'server_configs'
+        os.makedirs(self.config_dir, exist_ok=True)
         self.emojis = {
             'success': '✅',
             'error': '❌',
@@ -30,32 +28,37 @@ class RoleManagement(commands.Cog):
             'log': '📋'
         }
 
-    def load_configs(self):
+    def get_config_path(self, guild_id):
+        return os.path.join(self.config_dir, f'{guild_id}.json')
+
+    def load_configs(self, guild_id):
         """Load server configurations from JSON."""
+        config_path = self.get_config_path(guild_id)
         try:
-            with open(self.config_file, 'r') as f:
+            with open(config_path, 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
             return {}
 
-    def save_configs(self):
+    def save_configs(self, guild_id, config):
         """Save server configurations to JSON."""
-        with open(self.config_file, 'w') as f:
-            json.dump(self.server_configs, f, indent=4)
+        config_path = self.get_config_path(guild_id)
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
 
     def get_server_config(self, guild_id):
         """Get or create server configuration."""
-        guild_id = str(guild_id)
-        if guild_id not in self.server_configs:
-            self.server_configs[guild_id] = {
+        config = self.load_configs(guild_id)
+        if not config:
+            config = {
                 'role_mappings': {},
                 'reqrole_id': None,
                 'log_channel_id': None,
                 'role_assignment_limit': 5,
                 'admin_only_commands': True
             }
-            self.save_configs()
-        return self.server_configs[guild_id]
+            self.save_configs(guild_id, config)
+        return config
 
     async def log_activity(self, guild, action, details):
         """Log activities to the designated log channel."""
@@ -114,7 +117,7 @@ class RoleManagement(commands.Cog):
         """Set the log channel for server activities."""
         config = self.get_server_config(ctx.guild.id)
         config['log_channel_id'] = channel.id
-        self.save_configs()
+        self.save_configs(ctx.guild.id, config)
         
         embed = discord.Embed(
             title=f"{self.emojis['success']} Log Channel Set", 
@@ -131,7 +134,7 @@ class RoleManagement(commands.Cog):
         """Set the required role for role management commands."""
         config = self.get_server_config(ctx.guild.id)
         config['reqrole_id'] = role.id
-        self.save_configs()
+        self.save_configs(ctx.guild.id, config)
         
         embed = discord.Embed(
             title=f"{self.emojis['roles']} Required Role Set", 
@@ -154,7 +157,7 @@ class RoleManagement(commands.Cog):
         if role.id not in config['role_mappings'][custom_name]:
             config['role_mappings'][custom_name].append(role.id)
         
-        self.save_configs()
+        self.save_configs(ctx.guild.id, config)
         
         embed = discord.Embed(
             title=f"{self.emojis['success']} Role Mapping Added", 
@@ -168,24 +171,77 @@ class RoleManagement(commands.Cog):
         
         await self.log_activity(ctx.guild, "Role Mapping", f"Mapped '{custom_name}' to {role.name}")
 
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def reset_roles(self, ctx):
+        """Reset all role mappings for the server."""
+        if not await self.check_required_role(ctx):
+            return
+
+        class ConfirmView(discord.ui.View):
+            def __init__(self, ctx, cog):
+                super().__init__()
+                self.ctx = ctx
+                self.cog = cog
+
+            @discord.ui.button(label="Confirm Reset", style=discord.ButtonStyle.red)
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                config = self.cog.get_server_config(self.ctx.guild.id)
+                config['role_mappings'] = {}
+                self.cog.save_configs(self.ctx.guild.id, config)
+                
+                # Remove all dynamic commands
+                self.cog.create_dynamic_role_commands()
+                
+                embed = discord.Embed(
+                    title=f"{self.cog.emojis['warning']} Role Mappings Reset", 
+                    description="All role mappings have been cleared.", 
+                    color=SUCCESS_COLOR
+                )
+                await interaction.response.send_message(embed=embed)
+                
+                await self.cog.log_activity(self.ctx.guild, "Role Mapping Reset", "All role mappings cleared")
+                
+                self.stop()
+
+            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                embed = discord.Embed(
+                    title=f"{self.cog.emojis['error']} Reset Cancelled", 
+                    description="Role mapping reset was cancelled.", 
+                    color=ERROR_COLOR
+                )
+                await interaction.response.send_message(embed=embed)
+                self.stop()
+
+        embed = discord.Embed(
+            title=f"{self.emojis['warning']} Reset Role Mappings", 
+            description="Are you sure you want to reset all role mappings for this server?", 
+            color=ERROR_COLOR
+        )
+        view = ConfirmView(ctx, self)
+        await ctx.send(embed=embed, view=view)
+
     def create_dynamic_role_commands(self):
         """Dynamically create role commands for each server."""
         # Remove existing dynamic commands
-        for guild_id, config in self.server_configs.items():
+        for guild_id in os.listdir(self.config_dir):
+            config = self.load_configs(guild_id.split('.')[0])
             for custom_name in config.get('role_mappings', {}).keys():
                 if custom_name in self.bot.all_commands:
                     del self.bot.all_commands[custom_name]
 
         # Create new dynamic commands
-        for guild_id, config in self.server_configs.items():
+        for guild_id in os.listdir(self.config_dir):
+            config = self.load_configs(guild_id.split('.')[0])
             for custom_name in config.get('role_mappings', {}).keys():
-                async def dynamic_role_command(ctx, user: discord.Member = None, custom_name=custom_name):
+                async def dynamic_role_command(ctx, member: discord.Member = None, custom_name=custom_name):
                     # Check required role or admin permissions
                     if not await self.check_required_role(ctx):
                         return
                     
                     server_config = self.get_server_config(ctx.guild.id)
-                    user = user or ctx.author
+                    member = member or ctx.author
                     role_ids = server_config['role_mappings'].get(custom_name, [])
                     
                     if not role_ids:
@@ -212,11 +268,11 @@ class RoleManagement(commands.Cog):
                     roles_added = []
                     roles_removed = []
                     for role in roles:
-                        if role in user.roles:
-                            await user.remove_roles(role)
+                        if role in member.roles:
+                            await member.remove_roles(role)
                             roles_removed.append(role)
                         else:
-                            await user.add_roles(role)
+                            await member.add_roles(role)
                             roles_added.append(role)
 
                     # Send feedback
@@ -242,7 +298,7 @@ class RoleManagement(commands.Cog):
                     await self.log_activity(
                         ctx.guild, 
                         f"Role {action_type}", 
-                        f"{user.name} {action_type.lower()} roles: {', '.join(r.name for r in roles_list)}"
+                        f"{member.name} {action_type.lower()} roles: {', '.join(r.name for r in roles_list)}"
                     )
 
                 # Dynamically create the command
@@ -253,7 +309,7 @@ class RoleManagement(commands.Cog):
     async def on_ready(self):
         """Create dynamic role commands when bot is ready."""
         self.create_dynamic_role_commands()
-        logger.info(f'Dynamic role commands created for {len(self.server_configs)} servers')
+        logger.info(f'Dynamic role commands created for servers.')
 
     @commands.command()
     async def rolehelp(self, ctx):
@@ -267,7 +323,7 @@ class RoleManagement(commands.Cog):
         embed.add_field(name=".reset_roles", value="Reset all role mappings", inline=False)
         
         if config['role_mappings']:
-            roles_list = "\n".join(f"- .{name} [@user or user_id]" for name in config['role_mappings'].keys())
+            roles_list = "\n".join(f"- .{name} [@user]" for name in config['role_mappings'].keys())
             embed.add_field(name="Available Role Commands", value=roles_list, inline=False)
         
         await ctx.send(embed=embed)
