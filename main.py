@@ -4,6 +4,7 @@ import logging
 import os
 from dotenv import load_dotenv
 import asyncio
+import time
 
 # Load environment variables
 load_dotenv()
@@ -76,39 +77,40 @@ async def sync_commands_with_retry():
                     logging.warning("Failed to sync commands after multiple attempts.")
                 break  # Exit if an unexpected error occurs
 
-# Define a queue for message updates (to prevent hitting rate limits)
-update_queue = asyncio.Queue()
+# Throttle settings
+message_edit_delay = 1  # Time in seconds between message edits globally
+last_edit_time = 0  # Timestamp of the last edit
 
-async def update_message(channel_id, message_id, content):
-    """Add messages to the update queue to edit them."""
-    await update_queue.put((channel_id, message_id, content))
-
-async def process_queue():
-    """Process message updates from the queue with rate limit handling."""
+async def edit_message(channel_id, message_id, content):
+    """Edit a message, respecting rate limits."""
+    global last_edit_time
     while True:
-        channel_id, message_id, content = await update_queue.get()
-        success = False
-        while not success:
-            try:
-                channel = bot.get_channel(channel_id)
-                if channel:
-                    message = await channel.fetch_message(message_id)
-                    await message.edit(content=content)
-                    logging.info(f"Successfully edited message {message_id}.")
-                    success = True  # Mark as success
-                await asyncio.sleep(1)  # Delay to respect rate limits
-            except discord.HTTPException as e:
-                if e.code == 429:  # If rate limited
-                    retry_after = e.retry_after
-                    logging.warning(f"Rate limited while editing message {message_id}. Retrying in {retry_after:.2f} seconds.")
-                    await asyncio.sleep(retry_after)
-                else:
-                    logging.error(f"Failed to edit message {message_id}: {e}")
-                    break  # Exit if an unexpected error occurs
-            except Exception as e:
-                logging.error(f"Unexpected error editing message {message_id}: {e}")
+        current_time = time.time()
+        elapsed_time = current_time - last_edit_time
+
+        if elapsed_time < message_edit_delay:
+            # If the bot is trying to edit too quickly, wait for the remaining time
+            await asyncio.sleep(message_edit_delay - elapsed_time)
+
+        try:
+            channel = bot.get_channel(channel_id)
+            if channel:
+                message = await channel.fetch_message(message_id)
+                await message.edit(content=content)
+                logging.info(f"Successfully edited message {message_id}.")
+                last_edit_time = time.time()  # Update the last edit timestamp
+                break
+        except discord.HTTPException as e:
+            if e.code == 429:  # If rate limited
+                retry_after = e.retry_after
+                logging.warning(f"Rate limited while editing message {message_id}. Retrying in {retry_after:.2f} seconds.")
+                await asyncio.sleep(retry_after)  # Retry after the specified wait time
+            else:
+                logging.error(f"Failed to edit message {message_id}: {e}")
                 break  # Exit if an unexpected error occurs
-        update_queue.task_done()
+        except Exception as e:
+            logging.error(f"Unexpected error editing message {message_id}: {e}")
+            break  # Exit if an unexpected error occurs
 
 @bot.event
 async def on_ready():
@@ -122,8 +124,6 @@ async def on_ready():
     print("Registered slash commands:")
     for command in bot.tree.get_commands():
         print(f"- {command.name}")
-    # Start processing the message update queue
-    asyncio.create_task(process_queue())
 
 # Latency Ping Command with rate-limiting
 @bot.command()
