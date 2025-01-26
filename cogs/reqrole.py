@@ -351,7 +351,6 @@ class RoleManagement(commands.Cog):
                     # Log
                     added_names = ', '.join(r.name for r in roles_added)
                     removed_names = ', '.join(r.name for r in roles_removed)
-                    log_details = f"Added: {added_names
                     log_details = f"Added: {added_names}" if added_names else ""
                     if removed_names:
                         log_details += f" | Removed: {removed_names}"
