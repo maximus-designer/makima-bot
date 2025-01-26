@@ -40,34 +40,6 @@ cogs = [
     # Other cogs
 ]
 
-# Queue for managing rate-limited updates
-update_queue = asyncio.Queue()
-
-async def update_message(channel_id, message_id, content):
-    """Put a message update task in the queue."""
-    await update_queue.put((channel_id, message_id, content))
-
-async def process_queue():
-    """Process message updates from the queue."""
-    while True:
-        channel_id, message_id, content = await update_queue.get()
-        try:
-            channel = bot.get_channel(channel_id)
-            if channel:
-                message = await channel.fetch_message(message_id)
-                await message.edit(content=content)
-                logging.info(f"Successfully edited message {message_id}.")
-            await asyncio.sleep(1)  # Delay to respect rate limits
-        except discord.HTTPException as e:
-            logging.warning(f"Failed to edit message {message_id}: {e}")
-            if e.code == 429:  # If rate limited
-                retry_after = e.retry_after
-                logging.warning(f"Rate limited. Retrying in {retry_after:.2f} seconds.")
-                await asyncio.sleep(retry_after)
-                await update_message(channel_id, message_id, content)  # Retry
-        finally:
-            update_queue.task_done()
-
 async def load_cogs():
     """Load all specified cogs."""
     for cog in cogs:
@@ -104,6 +76,38 @@ async def sync_commands_with_retry():
                     logging.warning("Failed to sync commands after multiple attempts.")
                 break  # Exit if an unexpected error occurs
 
+# Define a queue for message updates (to prevent hitting rate limits)
+update_queue = asyncio.Queue()
+
+async def update_message(channel_id, message_id, content):
+    """Add messages to the update queue to edit them."""
+    await update_queue.put((channel_id, message_id, content))
+
+async def process_queue():
+    """Process message updates from the queue with exponential backoff."""
+    backoff_time = 1  # Initial wait time in seconds
+    while True:
+        channel_id, message_id, content = await update_queue.get()
+        try:
+            channel = bot.get_channel(channel_id)
+            if channel:
+                message = await channel.fetch_message(message_id)
+                await message.edit(content=content)
+                logging.info(f"Successfully edited message {message_id}.")
+            await asyncio.sleep(2)  # Delay to respect rate limits
+        except discord.HTTPException as e:
+            logging.warning(f"Failed to edit message {message_id}: {e}")
+            if e.code == 429:  # If rate limited
+                retry_after = e.retry_after
+                logging.warning(f"Rate limited. Retrying in {retry_after:.2f} seconds.")
+                await asyncio.sleep(retry_after)
+                await update_message(channel_id, message_id, content)  # Retry
+                # Apply exponential backoff
+                backoff_time = min(backoff_time * 2, 60)  # Max 60 seconds backoff
+                await asyncio.sleep(backoff_time)
+        finally:
+            update_queue.task_done()
+
 @bot.event
 async def on_ready():
     """When the bot is ready, print the bot info, sync commands, and list registered commands."""
@@ -116,8 +120,8 @@ async def on_ready():
     print("Registered slash commands:")
     for command in bot.tree.get_commands():
         print(f"- {command.name}")
-    # Start processing the update queue when the bot is ready
-    bot.loop.create_task(process_queue())
+    # Start processing the message update queue
+    asyncio.create_task(process_queue())
 
 # Latency Ping Command with rate-limiting
 @bot.command()
