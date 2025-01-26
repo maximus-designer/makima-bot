@@ -195,6 +195,9 @@ class RoleManagement(commands.Cog):
         if not await self.check_required_role(ctx):
             return
 
+        config = self.get_server_config(ctx.guild.id)
+        role_mappings = config['role_mappings']
+
         class ConfirmView(discord.ui.View):
             def __init__(self, ctx, cog):
                 super().__init__()
@@ -239,7 +242,19 @@ class RoleManagement(commands.Cog):
         view = ConfirmView(ctx, self)
         await ctx.send(embed=embed, view=view)
 
-    @commands.command()
+        # Dropdown for resetting a specific role mapping
+        if role_mappings:
+            options = [discord.SelectOption(label=name) for name in role_mappings.keys()]
+            select = discord.ui.Select(placeholder="Select a role mapping to reset", options=options)
+
+            async def select_callback(interaction: discord.Interaction):
+                selected_role = select.values[0]
+                await self.reset_specific_role(interaction, selected_role)
+
+            select.callback = select_callback
+            view.add_item(select)
+            await ctx.send(embed=embed, view=view)
+
     async def reset_specific_role(self, ctx, custom_name: str):
         """Reset a specific role mapping."""
         if not await self.check_admin_permissions(ctx):
