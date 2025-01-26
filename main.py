@@ -1,9 +1,10 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import logging
 import os
 from dotenv import load_dotenv
 from keep_alive import keep_alive  # Flask server to keep bot alive if needed
+import asyncio
 
 # Load environment variables
 load_dotenv()
@@ -74,8 +75,24 @@ async def on_ready():
     for command in bot.tree.get_commands():
         print(f"- {command.name}")
 
+@bot.event
+async def on_error(event, *args, **kwargs):
+    """Handle any unexpected errors."""
+    logging.error(f"Unexpected error occurred: {event} | {args} | {kwargs}")
+    print(f"Unexpected error occurred: {event}")
+
+@bot.event
+async def on_socket_response(msg):
+    """Handle socket events and detect rate limiting"""
+    if msg.get('op') == 7:  # op code 7 means rate-limited
+        retry_after = msg.get('d', {}).get('retry_after')
+        if retry_after:
+            logging.warning(f"Rate-limited: Retrying after {retry_after} seconds.")
+            await asyncio.sleep(retry_after)
+            
 # Latency Ping Command
 @bot.command()
+@commands.cooldown(1, 5, commands.BucketType.user)  # Add cooldown to prevent spamming ping command
 async def ping(ctx):
     """A latency ping command."""
     latency = bot.latency  # Bot's latency in seconds
