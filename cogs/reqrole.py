@@ -1,121 +1,151 @@
-import discord
-import logging
-from discord.ext import commands
-from discord.ext.commands import CommandNotFound, CommandOnCooldown, CommandRegistrationError
-from pymongo import MongoClient
 import os
+import logging
+import discord
+from discord.ext import commands
+from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-# MongoDB setup
-MONGO_URL = os.getenv("MONGO_URL")
-if not MONGO_URL:
-    raise ValueError("Missing MongoDB URL in environment variables.")
-mongo_client = MongoClient(MONGO_URL)
-db = mongo_client["role_management"]
-
-# Logging setup
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-EMBED_COLOR = 0x2f2136  # Default embed color
-
-
-class RoleManagement(commands.Cog):
+class RoleManagementSystem:
     def __init__(self, bot):
         self.bot = bot
+        self.mongo_client = None
+        self.db = None
+        
+    async def connect_to_database(self):
+        """Establish secure MongoDB connection."""
+        try:
+            mongo_uri = os.getenv('MONGO_URL')  # Changed to MONGO_URL
+            if not mongo_uri:
+                raise ValueError("MongoDB connection string not found in environment variables")
+            
+            self.mongo_client = AsyncIOMotorClient(mongo_uri)
+            self.db = self.mongo_client['role_management']
+            logger.info("Successfully connected to MongoDB")
+        except Exception as e:
+            logger.error(f"Database connection error: {e}")
+            raise
 
+class RoleManagementCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.role_system = RoleManagementSystem(bot)
+        
     async def cog_load(self):
-        logger.info("RoleManagement cog has been loaded.")
-
-    async def has_reqrole(self, ctx, guild_data):
-        """Check if the user has the required role."""
-        reqrole_id = guild_data.get("reqrole_id")
-        if not reqrole_id:
-            await ctx.send(embed=discord.Embed(description="The required role hasn't been set up yet!", color=EMBED_COLOR))
-            return False
-        if reqrole_id not in [role.id for role in ctx.author.roles]:
-            await ctx.send(embed=discord.Embed(description="You do not have the required role to use this command.", color=EMBED_COLOR))
-            return False
-        return True
-
-    async def get_guild_data(self, guild_id):
-        """Retrieve or create default data for a guild."""
-        guild_data = db.guilds.find_one({"guild_id": guild_id})
-        if not guild_data:
-            guild_data = {
-                "guild_id": guild_id,
-                "reqrole_id": None,
-                "role_mappings": {},
-                "log_channel_id": None,
-                "role_assignment_limit": 5,
-            }
-            db.guilds.insert_one(guild_data)
-        return guild_data
-
-    async def update_guild_data(self, guild_id, data):
-        """Update guild data in the database."""
-        db.guilds.update_one({"guild_id": guild_id}, {"$set": data})
+        """Initialize database connection on cog load."""
+        await self.role_system.connect_to_database()
+    
+    @commands.command(name="reset_all_roles")
+    @commands.has_permissions(manage_roles=True)
+    async def reset_all_roles(self, ctx, member: discord.Member = None):
+        """
+        Reset all custom roles for a user across multiple servers.
+        
+        Args:
+            ctx (commands.Context): Command context
+            member (discord.Member, optional): Member to reset roles for. Defaults to command invoker.
+        """
+        # Default to command invoker if no member specified
+        target_member = member or ctx.author
+        
+        try:
+            # Retrieve user's role data from database
+            user_roles_doc = await self.role_system.db.user_roles.find_one(
+                {"user_id": target_member.id}
+            )
+            
+            if not user_roles_doc:
+                await ctx.send(embed=discord.Embed(
+                    description="No custom roles found to reset.",
+                    color=discord.Color.orange()
+                ))
+                return
+            
+            # Track role reset statistics
+            reset_count = 0
+            failed_resets = []
+            
+            # Process role resets across all servers
+            for guild_id, role_ids in user_roles_doc.get('roles', {}).items():
+                try:
+                    guild = self.bot.get_guild(int(guild_id))
+                    if not guild:
+                        continue
+                    
+                    member_in_guild = guild.get_member(target_member.id)
+                    if not member_in_guild:
+                        continue
+                    
+                    # Remove roles
+                    roles_to_remove = [
+                        guild.get_role(role_id) 
+                        for role_id in role_ids 
+                        if guild.get_role(role_id)
+                    ]
+                    
+                    await member_in_guild.remove_roles(*roles_to_remove)
+                    reset_count += len(roles_to_remove)
+                
+                except Exception as guild_error:
+                    logger.error(f"Role reset error in guild {guild_id}: {guild_error}")
+                    failed_resets.append(guild_id)
+            
+            # Clear user's role data in database
+            await self.role_system.db.user_roles.delete_one(
+                {"user_id": target_member.id}
+            )
+            
+            # Construct comprehensive response
+            embed = discord.Embed(
+                title="🔄 Role Reset Summary",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Target", value=target_member.mention, inline=False)
+            embed.add_field(name="Roles Reset", value=str(reset_count), inline=True)
+            
+            if failed_resets:
+                embed.add_field(
+                    name="Failed Guilds", 
+                    value=f"{len(failed_resets)} guilds could not complete reset", 
+                    inline=True
+                )
+            
+            await ctx.send(embed=embed)
+        
+        except Exception as e:
+            logger.error(f"Comprehensive role reset error: {e}")
+            await ctx.send(embed=discord.Embed(
+                description="An unexpected error occurred during role reset.",
+                color=discord.Color.red()
+            ))
 
     @commands.Cog.listener()
-    async def on_ready(self):
-        logger.info(f"Logged in as {self.bot.user}")
-
-    @commands.command()
-    async def setreqrole(self, ctx, role: discord.Role):
-        """Set the required role for assigning/removing roles."""
-        if not ctx.author.guild_permissions.administrator:
-            await ctx.send(embed=discord.Embed(description="You do not have permission to use this command.", color=EMBED_COLOR))
-            return
-        guild_data = await self.get_guild_data(ctx.guild.id)
-        await self.update_guild_data(ctx.guild.id, {"reqrole_id": role.id})
-        await ctx.send(embed=discord.Embed(description=f"Required role set to {role.name}.", color=EMBED_COLOR))
-
-    @commands.command()
-    async def setrole(self, ctx, custom_name: str, role: discord.Role):
-        """Map a custom role name to an existing role."""
-        if not ctx.author.guild_permissions.administrator:
-            await ctx.send(embed=discord.Embed(description="You do not have permission to use this command.", color=EMBED_COLOR))
-            return
-
-        guild_data = await self.get_guild_data(ctx.guild.id)
-        role_mappings = guild_data["role_mappings"]
-        role_mappings[custom_name] = role.id
-        await self.update_guild_data(ctx.guild.id, {"role_mappings": role_mappings})
-        await ctx.send(embed=discord.Embed(description=f"Mapped custom role name \"{custom_name}\" to role {role.name}.", color=EMBED_COLOR))
-
-    @commands.command()
-    async def reset_roles(self, ctx):
-        """Reset all mapped roles in the server."""
-        if not ctx.author.guild_permissions.administrator:
-            await ctx.send(embed=discord.Embed(description="You do not have permission to use this command.", color=EMBED_COLOR))
-            return
-
-        await self.update_guild_data(ctx.guild.id, {"role_mappings": {}})
-        await ctx.send(embed=discord.Embed(description="All role mappings have been reset.", color=EMBED_COLOR))
-
-    @commands.command()
-    async def setlogchannel(self, ctx, channel: discord.TextChannel):
-        """Set the channel for logging role assignments."""
-        if not ctx.author.guild_permissions.administrator:
-            await ctx.send(embed=discord.Embed(description="You do not have permission to use this command.", color=EMBED_COLOR))
-            return
-
-        await self.update_guild_data(ctx.guild.id, {"log_channel_id": channel.id})
-        await ctx.send(embed=discord.Embed(description=f"Log channel set to {channel.name}.", color=EMBED_COLOR))
-
-    @commands.command()
-    async def set_role_limit(self, ctx, limit: int):
-        """Set the maximum number of custom roles a user can have."""
-        if not ctx.author.guild_permissions.administrator:
-            await ctx.send(embed=discord.Embed(description="You do not have permission to use this command.", color=EMBED_COLOR))
-            return
-
-        await self.update_guild_data(ctx.guild.id, {"role_assignment_limit": limit})
-        await ctx.send(embed=discord.Embed(description=f"Role assignment limit set to {limit}.", color=EMBED_COLOR))
-
+    async def on_guild_role_delete(self, role):
+        """
+        Automatically clean up role references when a role is deleted.
+        
+        Args:
+            role (discord.Role): Deleted role
+        """
+        try:
+            # Remove role references from database
+            result = await self.role_system.db.user_roles.update_many(
+                {f"roles.{role.guild.id}": role.id},
+                {"$pull": {f"roles.{role.guild.id}": role.id}}
+            )
+            
+            logger.info(f"Cleaned up {result.modified_count} role references after role deletion")
+        except Exception as e:
+            logger.error(f"Role cleanup error: {e}")
 
 async def setup(bot):
-    await bot.add_cog(RoleManagement(bot))
+    await bot.add_cog(RoleManagementCog(bot))
