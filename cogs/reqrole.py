@@ -146,9 +146,6 @@ class RoleManagement(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def setrole(self, ctx, custom_name: str, role: discord.Role):
         """Map a custom role name to a role."""
-        if not await self.check_required_role(ctx):
-            return
-        
         config = self.get_server_config(ctx.guild.id)
         
         if custom_name not in config['role_mappings']:
@@ -171,59 +168,6 @@ class RoleManagement(commands.Cog):
         
         await self.log_activity(ctx.guild, "Role Mapping", f"Mapped '{custom_name}' to {role.name}")
 
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def reset_roles(self, ctx):
-        """Reset all role mappings for the server."""
-        if not await self.check_required_role(ctx):
-            return
-
-        class ConfirmView(discord.ui.View):
-            def __init__(self, ctx, cog):
-                super().__init__()
-                self.ctx = ctx
-                self.cog = cog
-
-            @discord.ui.button(label="Confirm Reset", style=discord.ButtonStyle.red)
-            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-                config = self.cog.get_server_config(self.ctx.guild.id)
-                config['role_mappings'] = {}
-                self.cog.save_configs()
-                
-                # Remove all dynamic commands
-                for cmd_name in list(self.cog.bot.all_commands.keys()):
-                    if cmd_name in config['role_mappings']:
-                        del self.cog.bot.all_commands[cmd_name]
-                
-                embed = discord.Embed(
-                    title=f"{self.cog.emojis['warning']} Role Mappings Reset", 
-                    description="All role mappings have been cleared.", 
-                    color=SUCCESS_COLOR
-                )
-                await interaction.response.send_message(embed=embed)
-                
-                await self.cog.log_activity(self.ctx.guild, "Role Mapping Reset", "All role mappings cleared")
-                
-                self.stop()
-
-            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
-            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-                embed = discord.Embed(
-                    title=f"{self.cog.emojis['error']} Reset Cancelled", 
-                    description="Role mapping reset was cancelled.", 
-                    color=ERROR_COLOR
-                )
-                await interaction.response.send_message(embed=embed)
-                self.stop()
-
-        embed = discord.Embed(
-            title=f"{self.emojis['warning']} Reset Role Mappings", 
-            description="Are you sure you want to reset all role mappings for this server?", 
-            color=ERROR_COLOR
-        )
-        view = ConfirmView(ctx, self)
-        await ctx.send(embed=embed, view=view)
-
     def create_dynamic_role_commands(self):
         """Dynamically create role commands for each server."""
         # Remove existing dynamic commands
@@ -235,13 +179,13 @@ class RoleManagement(commands.Cog):
         # Create new dynamic commands
         for guild_id, config in self.server_configs.items():
             for custom_name in config.get('role_mappings', {}).keys():
-                async def dynamic_role_command(ctx, member: discord.Member = None, custom_name=custom_name):
+                async def dynamic_role_command(ctx, user: discord.Member = None, custom_name=custom_name):
                     # Check required role or admin permissions
                     if not await self.check_required_role(ctx):
                         return
                     
                     server_config = self.get_server_config(ctx.guild.id)
-                    member = member or ctx.author
+                    user = user or ctx.author
                     role_ids = server_config['role_mappings'].get(custom_name, [])
                     
                     if not role_ids:
@@ -268,11 +212,11 @@ class RoleManagement(commands.Cog):
                     roles_added = []
                     roles_removed = []
                     for role in roles:
-                        if role in member.roles:
-                            await member.remove_roles(role)
+                        if role in user.roles:
+                            await user.remove_roles(role)
                             roles_removed.append(role)
                         else:
-                            await member.add_roles(role)
+                            await user.add_roles(role)
                             roles_added.append(role)
 
                     # Send feedback
@@ -298,7 +242,7 @@ class RoleManagement(commands.Cog):
                     await self.log_activity(
                         ctx.guild, 
                         f"Role {action_type}", 
-                        f"{member.name} {action_type.lower()} roles: {', '.join(r.name for r in roles_list)}"
+                        f"{user.name} {action_type.lower()} roles: {', '.join(r.name for r in roles_list)}"
                     )
 
                 # Dynamically create the command
@@ -323,7 +267,7 @@ class RoleManagement(commands.Cog):
         embed.add_field(name=".reset_roles", value="Reset all role mappings", inline=False)
         
         if config['role_mappings']:
-            roles_list = "\n".join(f"- .{name} [@user]" for name in config['role_mappings'].keys())
+            roles_list = "\n".join(f"- .{name} [@user or user_id]" for name in config['role_mappings'].keys())
             embed.add_field(name="Available Role Commands", value=roles_list, inline=False)
         
         await ctx.send(embed=embed)
