@@ -94,17 +94,22 @@ class RoleManagement(commands.Cog):
             f"{ctx.author.name} attempted to use an admin-only command"
         )
 
-    def check_req_role(self, ctx):
+    async def check_req_role(self, ctx):
         """Check if the user has the required role."""
         config = self.get_server_config(ctx.guild.id)
         reqrole_id = config.get('reqrole_id')
         
-        # If no required role is set, allow role assignment
-        if reqrole_id is None:
-            return True
-        
-        # If required role is set, check if the user has the role
-        return any(role.id == reqrole_id for role in ctx.author.roles)
+        if reqrole_id:
+            reqrole = ctx.guild.get_role(reqrole_id)
+            if reqrole and reqrole not in ctx.author.roles:
+                embed = discord.Embed(
+                    title=f"{self.emojis['error']} Missing Required Role", 
+                    description=f"You need the {reqrole.mention} role to perform this action.", 
+                    color=ERROR_COLOR
+                )
+                await ctx.send(embed=embed)
+                return False
+        return True
 
     @commands.command()
     async def setlogchannel(self, ctx, channel: discord.TextChannel):
@@ -147,13 +152,8 @@ class RoleManagement(commands.Cog):
     @commands.command()
     async def setrole(self, ctx, custom_name: str, role: discord.Role):
         """Map a custom role name to a role."""
-        if not self.check_req_role(ctx):
-            embed = discord.Embed(
-                title=f"{self.emojis['error']} reqrole Missing", 
-                description="You do not have the required role to assign roles.", 
-                color=ERROR_COLOR
-            )
-            return await ctx.send(embed=embed)
+        if not ctx.author.guild_permissions.administrator:
+            return await self.admin_only_command(ctx)
         
         config = self.get_server_config(ctx.guild.id)
         
@@ -180,13 +180,8 @@ class RoleManagement(commands.Cog):
     @commands.command()
     async def reset_role(self, ctx):
         """Reset role mappings with interactive options."""
-        if not self.check_req_role(ctx):
-            embed = discord.Embed(
-                title=f"{self.emojis['error']} reqrole Missing", 
-                description="You do not have the required role to reset role mappings.", 
-                color=ERROR_COLOR
-            )
-            return await ctx.send(embed=embed)
+        if not ctx.author.guild_permissions.administrator:
+            return await self.admin_only_command(ctx)
         
         config = self.get_server_config(ctx.guild.id)
         role_mappings = config.get('role_mappings', {})
@@ -302,6 +297,9 @@ class RoleManagement(commands.Cog):
             config = self.load_configs(guild_id.split('.')[0])
             for custom_name in config.get('role_mappings', {}).keys():
                 async def dynamic_role_command(ctx, member: discord.Member = None, custom_name=custom_name):
+                    if not await self.check_req_role(ctx):
+                        return
+
                     server_config = self.get_server_config(ctx.guild.id)
                     member = member or ctx.author
                     role_ids = server_config['role_mappings'].get(custom_name, [])
@@ -383,12 +381,17 @@ class RoleManagement(commands.Cog):
         embed.add_field(name=".reqrole [@role]", value="Set required role for role management", inline=False)
         embed.add_field(name=".setrole [name] [@role]", value="Map a custom role name", inline=False)
         embed.add_field(name=".reset_role", value="Reset role mappings", inline=False)
+        embed.add_field(name=".rolehelp", value="Display help for role management commands", inline=False)
         
-        if config['role_mappings']:
-            roles_list = "\n".join(f"- .{name} [@user]" for name in config['role_mappings'].keys())
-            embed.add_field(name="Available Role Commands", value=roles_list, inline=False)
-        
+        # Add dynamically generated commands for role mappings
+        role_mappings = config.get('role_mappings', {})
+        if role_mappings:
+            embed.add_field(
+                name="Dynamic Role Commands", 
+                value="\n".join([f".{role_name}" for role_name in role_mappings.keys()]), 
+                inline=False
+            )
         await ctx.send(embed=embed)
 
-async def setup(bot):
-    await bot.add_cog(RoleManagement(bot))
+def setup(bot):
+    bot.add_cog(RoleManagement(bot))
