@@ -28,6 +28,7 @@ cogs = [
     "cogs.status_changer",
     "cogs.dragmee",
     "cogs.AvatarBannerUpdater",
+    "cogs.confess",
     # You can keep adding other cogs as needed
 ]
 
