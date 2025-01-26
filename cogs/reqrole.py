@@ -7,7 +7,7 @@ from discord.ext import commands
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Enhanced color palette
+# Enhanced color palette and emojis
 EMBED_COLOR = 0x2f2136
 SUCCESS_COLOR = 0x2ecc71
 ERROR_COLOR = 0xe74c3c
@@ -55,7 +55,7 @@ class RoleManagement(commands.Cog):
                 "role_mappings": {},
                 "reqrole_id": None,
                 "log_channel_id": None,
-                "role_assignment_limit": 100,
+                "role_assignment_limit": 5,
                 "admin_only_commands": True,
             }
             self.save_configs(guild_id, config)
@@ -113,6 +113,72 @@ class RoleManagement(commands.Cog):
         return True
 
     @commands.command()
+    async def setrole(self, ctx, role_name: str, role: discord.Role):
+        """Map a custom role name to a role."""
+        if not await self.check_required_role(ctx):
+            return
+
+        config = self.get_server_config(ctx.guild.id)
+
+        config["role_mappings"][role_name] = role.id
+        self.save_configs(ctx.guild.id, config)
+
+        embed = discord.Embed(
+            title=f"{self.emojis['success']} Role Mapping Added",
+            description=f"The command `.{role_name}` will now assign the {role.mention} role.",
+            color=SUCCESS_COLOR,
+        )
+        await ctx.send(embed=embed)
+
+    @commands.command()
+    async def reqrole(self, ctx, role: discord.Role):
+        """Set the required role for role management commands."""
+        if not ctx.author.guild_permissions.administrator:
+            embed = discord.Embed(
+                title=f"{self.emojis['error']} Permission Denied",
+                description="You must be an administrator to use this command.",
+                color=ERROR_COLOR,
+            )
+            await ctx.send(embed=embed)
+            return
+
+        config = self.get_server_config(ctx.guild.id)
+
+        config["reqrole_id"] = role.id
+        self.save_configs(ctx.guild.id, config)
+
+        embed = discord.Embed(
+            title=f"{self.emojis['success']} Required Role Set",
+            description=f"The required role for role management commands is now {role.mention}.",
+            color=SUCCESS_COLOR,
+        )
+        await ctx.send(embed=embed)
+
+    @commands.command()
+    async def setlogchannel(self, ctx, channel: discord.TextChannel):
+        """Set the log channel for server activities."""
+        if not ctx.author.guild_permissions.administrator:
+            embed = discord.Embed(
+                title=f"{self.emojis['error']} Permission Denied",
+                description="You must be an administrator to use this command.",
+                color=ERROR_COLOR,
+            )
+            await ctx.send(embed=embed)
+            return
+
+        config = self.get_server_config(ctx.guild.id)
+
+        config["log_channel_id"] = channel.id
+        self.save_configs(ctx.guild.id, config)
+
+        embed = discord.Embed(
+            title=f"{self.emojis['success']} Log Channel Set",
+            description=f"Log channel set to {channel.mention}.",
+            color=SUCCESS_COLOR,
+        )
+        await ctx.send(embed=embed)
+
+    @commands.command()
     async def reset_roles(self, ctx):
         """Reset all role mappings for the server."""
         if not ctx.author.guild_permissions.administrator:
@@ -134,8 +200,6 @@ class RoleManagement(commands.Cog):
             color=WARNING_COLOR,
         )
         await ctx.send(embed=embed)
-
-        await self.log_activity(ctx.guild, "Role Mappings Reset", "All mappings cleared.")
 
     @commands.command()
     async def reset_role(self, ctx, role_name: str):
@@ -170,10 +234,6 @@ class RoleManagement(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-        await self.log_activity(
-            ctx.guild, "Role Mapping Removed", f"Mapping for `{role_name}` removed."
-        )
-
     @commands.command()
     async def rolehelp(self, ctx):
         """Show role management commands."""
@@ -184,13 +244,13 @@ class RoleManagement(commands.Cog):
             color=INFO_COLOR,
         )
         embed.add_field(
-            name=".setlogchannel [@channel]",
-            value="Set log channel for bot activities",
+            name=".setrole [role_name] [@role]",
+            value="Map a custom role name to a role",
             inline=False,
         )
         embed.add_field(
             name=".reqrole [@role]",
-            value="Set required role for role management",
+            value="Set required role for role management commands",
             inline=False,
         )
         embed.add_field(
@@ -199,6 +259,11 @@ class RoleManagement(commands.Cog):
         embed.add_field(
             name=".reset_role [role_name]",
             value="Reset mapping for a specific role",
+            inline=False,
+        )
+        embed.add_field(
+            name=".setlogchannel [@channel]",
+            value="Set log channel for bot activities",
             inline=False,
         )
 
