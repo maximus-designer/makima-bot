@@ -111,34 +111,25 @@ class RoleManagement(commands.Cog):
         
         return True
 
-    async def handle_non_admin_attempt(self, ctx):
-        """Handle scenarios where a non-admin user tries to use an admin command."""
-        embed = discord.Embed(
-            title=f"{self.emojis['error']} Access Denied",
-            description="You do not have the required administrative permissions to execute this command.",
-            color=ERROR_COLOR
-        )
-        await ctx.send(embed=embed)
-
-    async def warn_non_admin(self, ctx):
-        """Warn non-admin users about attempting to use admin commands."""
-        embed = discord.Embed(
-            title=f"{self.emojis['warning']} Restricted Command",
-            description="This command is restricted to administrators only. Please contact a server admin for assistance.",
-            color=WARNING_COLOR
-        )
-        await ctx.send(embed=embed)
-
-    async def cog_before_invoke(self, ctx):
-        """Hook called before any command invocation."""
-        if ctx.command and ctx.command.name in self.bot.all_commands and not ctx.author.guild_permissions.administrator:
-            await self.warn_non_admin(ctx)
-            raise commands.CheckFailure("User does not have admin permissions.")
+    async def check_admin_permissions(self, ctx):
+        """Warn users without admin permissions about restricted commands."""
+        if not ctx.author.guild_permissions.administrator:
+            embed = discord.Embed(
+                title=f"{self.emojis['warning']} Admin Permission Warning",
+                description="You do not have permission to use this admin command.",
+                color=WARNING_COLOR
+            )
+            await ctx.send(embed=embed)
+            return False
+        return True
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setlogchannel(self, ctx, channel: discord.TextChannel):
         """Set the log channel for server activities."""
+        if not await self.check_admin_permissions(ctx):
+            return
+
         config = self.get_server_config(ctx.guild.id)
         config['log_channel_id'] = channel.id
         self.save_configs(ctx.guild.id, config)
@@ -156,6 +147,9 @@ class RoleManagement(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def reqrole(self, ctx, role: discord.Role):
         """Set the required role for role management commands."""
+        if not await self.check_admin_permissions(ctx):
+            return
+
         config = self.get_server_config(ctx.guild.id)
         config['reqrole_id'] = role.id
         self.save_configs(ctx.guild.id, config)
@@ -173,6 +167,9 @@ class RoleManagement(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def setrole(self, ctx, custom_name: str, role: discord.Role):
         """Map a custom role name to a role."""
+        if not await self.check_admin_permissions(ctx):
+            return
+
         config = self.get_server_config(ctx.guild.id)
         
         if custom_name not in config['role_mappings']:
@@ -200,6 +197,9 @@ class RoleManagement(commands.Cog):
     async def reset_roles(self, ctx):
         """Reset all role mappings for the server."""
         if not await self.check_required_role(ctx):
+            return
+
+        if not await self.check_admin_permissions(ctx):
             return
 
         class ConfirmView(discord.ui.View):
@@ -253,6 +253,9 @@ class RoleManagement(commands.Cog):
         if not await self.check_required_role(ctx):
             return
 
+        if not await self.check_admin_permissions(ctx):
+            return
+
         config = self.get_server_config(ctx.guild.id)
         if custom_name not in config['role_mappings']:
             embed = discord.Embed(
@@ -294,6 +297,9 @@ class RoleManagement(commands.Cog):
                 async def dynamic_role_command(ctx, member: discord.Member = None, custom_name=custom_name):
                     # Check required role or admin permissions
                     if not await self.check_required_role(ctx):
+                        return
+                    
+                    if not await self.check_admin_permissions(ctx):
                         return
                     
                     server_config = self.get_server_config(ctx.guild.id)
@@ -348,24 +354,42 @@ class RoleManagement(commands.Cog):
                         )
                         await ctx.send(embed=embed)
 
-                    # Log
-                    added_names = ', '.join(r.name for r in roles_added)
-                    removed_names = ', '.join(r.name for r in roles_removed)
-                    log_details = f"Added: {added_names}" if added_names else ""
-                    if removed_names:
-                        log_details += f" | Removed: {removed_names}"
-
+                    # Log the activity
+                    action_type = "Added" if roles_added else "Removed"
+                    roles_list = roles_added or roles_removed
                     await self.log_activity(
-                        ctx.guild,
-                        "Dynamic Role Command",
-                        f"Roles modified for {member.display_name}: {log_details}"
+                        ctx.guild, 
+                        f"Role {action_type}", 
+                        f"{member.name} {action_type.lower()} roles: {', '.join(r.name for r in roles_list)}"
                     )
 
-                # Add the dynamic command to the bot
-                dynamic_role_command.__name__ = custom_name
-                dynamic_command = commands.Command(
-                    name=custom_name,
-                    callback=dynamic_role_command,
-                    help=f"Assign or remove roles mapped to '{custom_name}'."
-                )
-                self.bot.add_command(dynamic_command)
+                # Dynamically create the command
+                command = commands.command(name=custom_name)(dynamic_role_command)
+                self.bot.add_command(command)
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Create dynamic role commands when bot is ready."""
+        self.create_dynamic_role_commands()
+        logger.info(f'Dynamic role commands created for servers.')
+
+    @commands.command()
+    async def rolehelp(self, ctx):
+        """Show role management commands."""
+        config = self.get_server_config(ctx.guild.id)
+        
+        embed = discord.Embed(title=f"{self.emojis['info']} Role Management", color=INFO_COLOR)
+        embed.add_field(name=".setlogchannel [@channel]", value="Set log channel for bot activities", inline=False)
+        embed.add_field(name=".reqrole [@role]", value="Set required role for role management", inline=False)
+        embed.add_field(name=".setrole [name] [@role]", value="Map a custom role name", inline=False)
+        embed.add_field(name=".reset_roles", value="Reset all role mappings", inline=False)
+        embed.add_field(name=".reset_specific_role [name]", value="Reset a specific role mapping", inline=False)
+        
+        if config['role_mappings']:
+            roles_list = "\n".join(f"- .{name} [@user]" for name in config['role_mappings'].keys())
+            embed.add_field(name="Available Role Commands", value=roles_list, inline=False)
+        
+        await ctx.send(embed=embed)
+
+async def setup(bot):
+    await bot.add_cog(RoleManagement(bot))
