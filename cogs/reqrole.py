@@ -191,7 +191,9 @@ class RoleManagement(commands.Cog):
     @commands.command()
     async def reset_role(self, ctx):
         """Reset role mappings with interactive options."""
-        # Remove admin restriction
+        if not ctx.author.guild_permissions.administrator:
+            return await self.admin_only_command(ctx)
+        
         config = self.get_server_config(ctx.guild.id)
         role_mappings = config.get('role_mappings', {})
 
