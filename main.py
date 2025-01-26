@@ -38,17 +38,6 @@ cogs = [
     "cogs.thread",
     "cogs.av",
     "cogs.key_generator",
-    "cogs.welcome",
-    "cogs.logger",
-    "cogs.moderation",
-    "cogs.fun",
-    "cogs.economy",
-    "cogs.music",
-    "cogs.games",
-    "cogs.auto_mod",
-    "cogs.report_system",
-    "cogs.polls",
-    "cogs.suggestion_box",
     # You can keep adding other cogs as needed
 ]
 
