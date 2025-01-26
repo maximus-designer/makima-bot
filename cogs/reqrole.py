@@ -39,7 +39,7 @@ class RoleManagement(commands.Cog):
                 'role_mappings': {},
                 'reqrole_id': None,
                 'log_channel_id': None,
-                'role_assignment_limit': 100
+                'role_assignment_limit': 5
             }
             self.save_configs()
         return self.server_configs[guild_id]
@@ -111,6 +111,9 @@ class RoleManagement(commands.Cog):
             color=SUCCESS_COLOR
         )
         await ctx.send(embed=embed)
+        
+        # Regenerate dynamic commands
+        self.create_dynamic_role_commands()
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -130,6 +133,11 @@ class RoleManagement(commands.Cog):
                 config = self.cog.get_server_config(self.ctx.guild.id)
                 config['role_mappings'] = {}
                 self.cog.save_configs()
+                
+                # Remove all dynamic commands
+                for cmd_name in list(self.cog.bot.all_commands.keys()):
+                    if cmd_name in config['role_mappings']:
+                        del self.cog.bot.all_commands[cmd_name]
                 
                 embed = discord.Embed(
                     title="Role Mappings Reset", 
@@ -159,6 +167,13 @@ class RoleManagement(commands.Cog):
 
     def create_dynamic_role_commands(self):
         """Dynamically create role commands for each server."""
+        # Remove existing dynamic commands
+        for guild_id, config in self.server_configs.items():
+            for custom_name in config.get('role_mappings', {}).keys():
+                if custom_name in self.bot.all_commands:
+                    del self.bot.all_commands[custom_name]
+
+        # Create new dynamic commands
         for guild_id, config in self.server_configs.items():
             for custom_name in config.get('role_mappings', {}).keys():
                 async def dynamic_role_command(ctx, member: discord.Member = None, custom_name=custom_name):
@@ -218,9 +233,9 @@ class RoleManagement(commands.Cog):
                         )
                         await ctx.send(embed=embed)
 
-                dynamic_role_command.name = custom_name
-                dynamic_role_command = commands.command(name=custom_name)(dynamic_role_command)
-                self.bot.add_command(dynamic_role_command)
+                # Dynamically create the command
+                command = commands.command(name=custom_name)(dynamic_role_command)
+                self.bot.add_command(command)
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -239,8 +254,8 @@ class RoleManagement(commands.Cog):
         embed.add_field(name=".reset_roles", value="Reset all role mappings", inline=False)
         
         if config['role_mappings']:
-            roles_list = "\n".join(f"- .{name}" for name in config['role_mappings'].keys())
-            embed.add_field(name="Available Mappings", value=roles_list, inline=False)
+            roles_list = "\n".join(f"- .{name} [@user]" for name in config['role_mappings'].keys())
+            embed.add_field(name="Available Role Commands", value=roles_list, inline=False)
         
         await ctx.send(embed=embed)
 
