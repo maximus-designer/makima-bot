@@ -2,6 +2,7 @@ import discord
 import logging
 import os
 import json
+import sqlite3
 from discord.ext import commands
 
 logging.basicConfig(level=logging.INFO)
@@ -17,8 +18,8 @@ WARNING_COLOR = 0xf39c12
 class RoleManagement(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config_dir = 'server_configs'
-        os.makedirs(self.config_dir, exist_ok=True)
+        self.db_name = 'role_mappings.db'
+        self.create_db()
         self.emojis = {
             'success': '✅',
             'error': '❌',
@@ -28,55 +29,85 @@ class RoleManagement(commands.Cog):
             'log': '📋'
         }
 
-    def get_config_path(self, guild_id):
-        return os.path.join(self.config_dir, f'{guild_id}.json')
-
-    def load_configs(self, guild_id):
-        """Load server configurations from JSON."""
-        config_path = self.get_config_path(guild_id)
-        try:
-            with open(config_path, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {}
-
-    def save_configs(self, guild_id, config):
-        """Save server configurations to JSON."""
-        config_path = self.get_config_path(guild_id)
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=4)
+    def create_db(self):
+        """Create the database and tables if they don't exist."""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        cursor.execute('''CREATE TABLE IF NOT EXISTS server_configs (
+                            guild_id INTEGER PRIMARY KEY,
+                            reqrole_id INTEGER,
+                            log_channel_id INTEGER,
+                            role_assignment_limit INTEGER,
+                            admin_only_commands BOOLEAN)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS role_mappings (
+                            guild_id INTEGER,
+                            custom_name TEXT,
+                            role_id INTEGER,
+                            PRIMARY KEY (guild_id, custom_name, role_id))''')
+        conn.commit()
+        conn.close()
 
     def get_server_config(self, guild_id):
-        """Get or create server configuration."""
-        config = self.load_configs(guild_id)
-        if not config:
+        """Get or create server configuration from database."""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM server_configs WHERE guild_id = ?", (guild_id,))
+        result = cursor.fetchone()
+        
+        if result is None:
             config = {
-                'role_mappings': {},
                 'reqrole_id': None,
                 'log_channel_id': None,
                 'role_assignment_limit': 5,
                 'admin_only_commands': True
             }
-            self.save_configs(guild_id, config)
+            cursor.execute("INSERT INTO server_configs (guild_id, reqrole_id, log_channel_id, role_assignment_limit, admin_only_commands) VALUES (?, ?, ?, ?, ?)",
+                           (guild_id, config['reqrole_id'], config['log_channel_id'], config['role_assignment_limit'], config['admin_only_commands']))
+            conn.commit()
+        else:
+            config = {
+                'reqrole_id': result[1],
+                'log_channel_id': result[2],
+                'role_assignment_limit': result[3],
+                'admin_only_commands': result[4]
+            }
+        conn.close()
         return config
 
-    async def log_activity(self, guild, action, details):
-        """Log activities to the designated log channel."""
-        config = self.get_server_config(guild.id)
-        log_channel_id = config.get('log_channel_id')
-        
-        if log_channel_id:
-            try:
-                log_channel = guild.get_channel(log_channel_id)
-                if log_channel:
-                    embed = discord.Embed(
-                        title=f"{self.emojis['log']} Activity Log",
-                        description=f"**Action:** {action}\n**Details:** {details}",
-                        color=INFO_COLOR
-                    )
-                    await log_channel.send(embed=embed)
-            except Exception as e:
-                logger.error(f"Logging error: {e}")
+    def save_server_config(self, guild_id, config):
+        """Save server configuration to the database."""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE server_configs SET reqrole_id = ?, log_channel_id = ?, role_assignment_limit = ?, admin_only_commands = ? WHERE guild_id = ?",
+                       (config['reqrole_id'], config['log_channel_id'], config['role_assignment_limit'], config['admin_only_commands'], guild_id))
+        conn.commit()
+        conn.close()
+
+    def get_role_mappings(self, guild_id):
+        """Get all role mappings for a server."""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT custom_name, role_id FROM role_mappings WHERE guild_id = ?", (guild_id,))
+        mappings = cursor.fetchall()
+        conn.close()
+        return {mapping[0]: [mapping[1]] for mapping in mappings}
+
+    def save_role_mapping(self, guild_id, custom_name, role_id):
+        """Save a role mapping for a server."""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO role_mappings (guild_id, custom_name, role_id) VALUES (?, ?, ?)",
+                       (guild_id, custom_name, role_id))
+        conn.commit()
+        conn.close()
+
+    def delete_role_mapping(self, guild_id, custom_name):
+        """Delete all role mappings for a server."""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM role_mappings WHERE guild_id = ? AND custom_name = ?", (guild_id, custom_name))
+        conn.commit()
+        conn.close()
 
     async def check_required_role(self, ctx):
         """Check if user has the required role or is an administrator."""
@@ -87,17 +118,6 @@ class RoleManagement(commands.Cog):
         if ctx.author.guild_permissions.administrator:
             return True
         
-        # Check if the command is an admin-only command
-        if config.get('admin_only_commands', True):
-            embed = discord.Embed(
-                title=f"{self.emojis['warning']} Admin Command",
-                description="You do not have permission to use this command. Only administrators can use this.",
-                color=WARNING_COLOR
-            )
-            await ctx.send(embed=embed)
-            return False
-
-        # If there's no required role or the user has the role, allow the command
         if not reqrole_id:
             return True
         
@@ -122,16 +142,31 @@ class RoleManagement(commands.Cog):
         
         return True
 
+    async def log_activity(self, guild, action, details):
+        """Log activities to the designated log channel."""
+        config = self.get_server_config(guild.id)
+        log_channel_id = config.get('log_channel_id')
+        
+        if log_channel_id:
+            try:
+                log_channel = guild.get_channel(log_channel_id)
+                if log_channel:
+                    embed = discord.Embed(
+                        title=f"{self.emojis['log']} Activity Log",
+                        description=f"**Action:** {action}\n**Details:** {details}",
+                        color=INFO_COLOR
+                    )
+                    await log_channel.send(embed=embed)
+            except Exception as e:
+                logger.error(f"Logging error: {e}")
+
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setlogchannel(self, ctx, channel: discord.TextChannel):
         """Set the log channel for server activities."""
-        if not await self.check_required_role(ctx):
-            return
-
         config = self.get_server_config(ctx.guild.id)
         config['log_channel_id'] = channel.id
-        self.save_configs(ctx.guild.id, config)
+        self.save_server_config(ctx.guild.id, config)
         
         embed = discord.Embed(
             title=f"{self.emojis['success']} Log Channel Set", 
@@ -146,12 +181,9 @@ class RoleManagement(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def reqrole(self, ctx, role: discord.Role):
         """Set the required role for role management commands."""
-        if not await self.check_required_role(ctx):
-            return
-
         config = self.get_server_config(ctx.guild.id)
         config['reqrole_id'] = role.id
-        self.save_configs(ctx.guild.id, config)
+        self.save_server_config(ctx.guild.id, config)
         
         embed = discord.Embed(
             title=f"{self.emojis['roles']} Required Role Set", 
@@ -166,18 +198,9 @@ class RoleManagement(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def setrole(self, ctx, custom_name: str, role: discord.Role):
         """Map a custom role name to a role."""
-        if not await self.check_required_role(ctx):
-            return
-
         config = self.get_server_config(ctx.guild.id)
         
-        if custom_name not in config['role_mappings']:
-            config['role_mappings'][custom_name] = []
-        
-        if role.id not in config['role_mappings'][custom_name]:
-            config['role_mappings'][custom_name].append(role.id)
-        
-        self.save_configs(ctx.guild.id, config)
+        self.save_role_mapping(ctx.guild.id, custom_name, role.id)
         
         embed = discord.Embed(
             title=f"{self.emojis['success']} Role Mapping Added", 
@@ -185,9 +208,6 @@ class RoleManagement(commands.Cog):
             color=SUCCESS_COLOR
         )
         await ctx.send(embed=embed)
-        
-        # Regenerate dynamic commands
-        self.create_dynamic_role_commands()
         
         await self.log_activity(ctx.guild, "Role Mapping", f"Mapped '{custom_name}' to {role.name}")
 
@@ -206,22 +226,14 @@ class RoleManagement(commands.Cog):
 
             @discord.ui.button(label="Confirm Reset", style=discord.ButtonStyle.red)
             async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-                config = self.cog.get_server_config(self.ctx.guild.id)
-                config['role_mappings'] = {}
-                self.cog.save_configs(self.ctx.guild.id, config)
-                
-                # Remove all dynamic commands
-                self.cog.create_dynamic_role_commands()
-                
+                self.cog.delete_role_mapping(self.ctx.guild.id, '*')
                 embed = discord.Embed(
                     title=f"{self.cog.emojis['warning']} Role Mappings Reset", 
                     description="All role mappings have been cleared.", 
                     color=SUCCESS_COLOR
                 )
                 await interaction.response.send_message(embed=embed)
-                
                 await self.cog.log_activity(self.ctx.guild, "Role Mapping Reset", "All role mappings cleared")
-                
                 self.stop()
 
             @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
@@ -250,6 +262,7 @@ class RoleManagement(commands.Cog):
             return
 
         config = self.get_server_config(ctx.guild.id)
+        
         if custom_name not in config['role_mappings']:
             embed = discord.Embed(
                 title=f"{self.emojis['error']} Role Mapping Not Found", 
@@ -259,12 +272,8 @@ class RoleManagement(commands.Cog):
             await ctx.send(embed=embed)
             return
 
-        del config['role_mappings'][custom_name]
-        self.save_configs(ctx.guild.id, config)
+        self.delete_role_mapping(ctx.guild.id, custom_name)
         
-        # Remove dynamic commands
-        self.create_dynamic_role_commands()
-
         embed = discord.Embed(
             title=f"{self.emojis['success']} Role Mapping Reset", 
             description=f"Role mapping for '{custom_name}' has been cleared.", 
@@ -274,96 +283,6 @@ class RoleManagement(commands.Cog):
         
         await self.log_activity(ctx.guild, "Role Mapping Reset", f"Role mapping for '{custom_name}' cleared")
 
-    def create_dynamic_role_commands(self):
-        """Dynamically create role commands for each server."""
-        # Remove existing dynamic commands
-        for guild_id in os.listdir(self.config_dir):
-            config = self.load_configs(guild_id.split('.')[0])
-            for custom_name in config.get('role_mappings', {}).keys():
-                if custom_name in self.bot.all_commands:
-                    del self.bot.all_commands[custom_name]
-
-        # Create new dynamic commands
-        for guild_id in os.listdir(self.config_dir):
-            config = self.load_configs(guild_id.split('.')[0])
-            for custom_name in config.get('role_mappings', {}).keys():
-                async def dynamic_role_command(ctx, member: discord.Member = None, custom_name=custom_name):
-                    # Check required role or admin permissions
-                    if not await self.check_required_role(ctx):
-                        return
-                    
-                    server_config = self.get_server_config(ctx.guild.id)
-                    member = member or ctx.author
-                    role_ids = server_config['role_mappings'].get(custom_name, [])
-                    
-                    if not role_ids:
-                        embed = discord.Embed(
-                            title=f"{self.emojis['error']} Role Error", 
-                            description=f"No roles mapped to '{custom_name}'", 
-                            color=ERROR_COLOR
-                        )
-                        await ctx.send(embed=embed)
-                        return
-
-                    roles = [ctx.guild.get_role(role_id) for role_id in role_ids if ctx.guild.get_role(role_id)]
-                    
-                    if not roles:
-                        embed = discord.Embed(
-                            title=f"{self.emojis['error']} Role Error", 
-                            description="No valid roles found for this mapping", 
-                            color=ERROR_COLOR
-                        )
-                        await ctx.send(embed=embed)
-                        return
-
-                    # Modify roles
-                    roles_added = []
-                    roles_removed = []
-                    for role in roles:
-                        if role in member.roles:
-                            await member.remove_roles(role)
-                            roles_removed.append(role)
-                        else:
-                            await member.add_roles(role)
-                            roles_added.append(role)
-
-                    # Send feedback
-                    if roles_added:
-                        embed = discord.Embed(
-                            title=f"{self.emojis['success']} Roles Added", 
-                            description=f"Added: {', '.join(r.name for r in roles_added)}", 
-                            color=SUCCESS_COLOR
-                        )
-                        await ctx.send(embed=embed)
-                    
-                    if roles_removed:
-                        embed = discord.Embed(
-                            title=f"{self.emojis['warning']} Roles Removed", 
-                            description=f"Removed: {', '.join(r.name for r in roles_removed)}", 
-                            color=ERROR_COLOR
-                        )
-                        await ctx.send(embed=embed)
-
-                    # Log the activity
-                    action_type = "Added" if roles_added else "Removed"
-                    roles_list = roles_added or roles_removed
-                    await self.log_activity(
-                        ctx.guild, 
-                        f"Role {action_type}", 
-                        f"{member.name} {action_type.lower()} roles: {', '.join(r.name for r in roles_list)}"
-                    )
-
-                # Dynamically create the command
-                command = commands.command(name=custom_name)(dynamic_role_command)
-                self.bot.add_command(command)
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        """Create dynamic role commands when bot is ready."""
-        self.create_dynamic_role_commands()
-        logger.info(f'Dynamic role commands created for servers.')
-
-    @commands.command()
     async def rolehelp(self, ctx):
         """Show role management commands."""
         config = self.get_server_config(ctx.guild.id)
@@ -375,11 +294,7 @@ class RoleManagement(commands.Cog):
         embed.add_field(name=".reset_roles", value="Reset all role mappings", inline=False)
         embed.add_field(name=".reset_specific_role [name]", value="Reset a specific role mapping", inline=False)
         
-        if config['role_mappings']:
-            roles_list = "\n".join(f"- .{name} [@user]" for name in config['role_mappings'])
-            embed.add_field(name="Role Mappings", value=roles_list, inline=False)
-
         await ctx.send(embed=embed)
 
-def setup(bot):
-    bot.add_cog(RoleManagement(bot))
+async def setup(bot):
+    await bot.add_cog(RoleManagement(bot))
