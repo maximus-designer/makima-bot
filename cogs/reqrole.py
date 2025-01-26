@@ -4,6 +4,7 @@ import logging
 import motor.motor_asyncio
 from discord.ext import commands
 from dotenv import load_dotenv
+from typing import Dict, List
 
 # Load environment variables
 load_dotenv()
@@ -20,21 +21,23 @@ class RoleManagementCog(commands.Cog):
         self.bot = bot
         self.EMBED_COLOR = 0x2f2136
         
-        # MongoDB connection
+        # MongoDB connection with separate database for each server
         self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(os.getenv('MONGO_URL'))
-        self.db = self.mongo_client['discord_role_management']
-        self.guild_configs = self.db['guild_configurations']
-        self.role_mappings = self.db['role_mappings']
+        
+    def get_guild_db(self, guild_id: str):
+        """Create a separate database for each guild."""
+        return self.mongo_client[f'discord_role_management_{guild_id}']
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setreqrole(self, ctx, role: discord.Role):
         """Set the role required for assigning/removing roles."""
-        guild_id = str(ctx.guild.id)
+        guild_db = self.get_guild_db(str(ctx.guild.id))
+        guild_configs = guild_db['guild_configurations']
         
         # Update guild configuration with required role
-        await self.guild_configs.update_one(
-            {"guild_id": guild_id},
+        await guild_configs.update_one(
+            {"config_type": "role_management"},
             {"$set": {"required_role_id": role.id}},
             upsert=True
         )
@@ -43,13 +46,14 @@ class RoleManagementCog(commands.Cog):
             description=f"Required role set to {role.name}", 
             color=self.EMBED_COLOR
         ))
-        logger.info(f"Required role set to {role.name} for guild {guild_id}")
+        logger.info(f"Required role set to {role.name} for guild {ctx.guild.id}")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setrole(self, ctx, custom_name: str, role: discord.Role):
-        """Map a custom name to a role."""
-        guild_id = str(ctx.guild.id)
+        """Map a custom name to a role and allow multiple roles."""
+        guild_db = self.get_guild_db(str(ctx.guild.id))
+        role_mappings = guild_db['role_mappings']
         
         # Check bot's role hierarchy
         if role.position >= ctx.guild.me.top_role.position:
@@ -59,15 +63,15 @@ class RoleManagementCog(commands.Cog):
             ))
             return
         
-        # Store role mapping
-        await self.role_mappings.update_one(
+        # Store role mapping with unique identifier
+        await role_mappings.update_one(
             {
-                "guild_id": guild_id, 
-                "custom_name": custom_name
+                "custom_name": custom_name.lower()
             },
             {"$set": {
                 "role_id": role.id, 
-                "role_name": role.name
+                "role_name": role.name,
+                "guild_id": str(ctx.guild.id)
             }},
             upsert=True
         )
@@ -81,11 +85,12 @@ class RoleManagementCog(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def setlogchannel(self, ctx, channel: discord.TextChannel):
         """Set the log channel for role actions."""
-        guild_id = str(ctx.guild.id)
+        guild_db = self.get_guild_db(str(ctx.guild.id))
+        guild_configs = guild_db['guild_configurations']
         
         # Update guild configuration with log channel
-        await self.guild_configs.update_one(
-            {"guild_id": guild_id},
+        await guild_configs.update_one(
+            {"config_type": "role_management"},
             {"$set": {"log_channel_id": channel.id}},
             upsert=True
         )
@@ -94,96 +99,15 @@ class RoleManagementCog(commands.Cog):
             description=f"Log channel set to {channel.mention}", 
             color=self.EMBED_COLOR
         ))
-        logger.info(f"Log channel set to {channel.name} for guild {guild_id}")
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def reset_all_roles(self, ctx, confirmation: str = None):
-        """Reset all mapped custom roles for the current server."""
-        # Check if user has required role
-        if not await self.check_required_role(ctx):
-            return
-        
-        guild_id = str(ctx.guild.id)
-        
-        # Prompt for confirmation if not already confirmed
-        if confirmation != "confirm":
-            await ctx.send(embed=discord.Embed(
-                title="⚠️ Role Reset Confirmation",
-                description=(
-                    "This will remove ALL mapped custom roles from server members.\n\n"
-                    "To proceed, type `.reset_all_roles confirm`\n"
-                    "This action cannot be undone!"
-                ), 
-                color=self.EMBED_COLOR
-            ))
-            return
-        
-        # Find all custom role mappings for this guild
-        role_mappings = await self.role_mappings.find({"guild_id": guild_id}).to_list(length=None)
-        
-        if not role_mappings:
-            await ctx.send(embed=discord.Embed(
-                description="No custom role mappings found for this server.", 
-                color=self.EMBED_COLOR
-            ))
-            return
-        
-        # Collect mapped role IDs
-        mapped_role_ids = [mapping['role_id'] for mapping in role_mappings]
-        
-        # Remove mapped roles from all members
-        removed_count = 0
-        for member in ctx.guild.members:
-            # Find roles to remove (only those mapped)
-            roles_to_remove = [role for role in member.roles if role.id in mapped_role_ids]
-            
-            if roles_to_remove:
-                await member.remove_roles(*roles_to_remove)
-                removed_count += 1
-        
-        # Log channel notification
-        config = await self.guild_configs.find_one({"guild_id": guild_id})
-        if config and 'log_channel_id' in config:
-            log_channel = ctx.guild.get_channel(config['log_channel_id'])
-            if log_channel:
-                await log_channel.send(embed=discord.Embed(
-                    description=f"{ctx.author.mention} reset all mapped roles for the server.", 
-                    color=self.EMBED_COLOR
-                ))
-        
-        # Send confirmation
-        await ctx.send(embed=discord.Embed(
-            description=f"Removed mapped roles from {removed_count} members.", 
-            color=self.EMBED_COLOR
-        ))
-        
-        # Log the action
-        logger.info(f"Reset all mapped roles for guild {guild_id}")
-
-    @commands.command()
-    async def set_role_limit(self, ctx, limit: int):
-        """Set the maximum number of custom roles per user for the server."""
-        guild_id = str(ctx.guild.id)
-        
-        # Update or create guild configuration
-        await self.guild_configs.update_one(
-            {"guild_id": guild_id},
-            {"$set": {"role_assignment_limit": limit}},
-            upsert=True
-        )
-        
-        await ctx.send(embed=discord.Embed(
-            description=f"Role assignment limit set to {limit} for this server.", 
-            color=self.EMBED_COLOR
-        ))
+        logger.info(f"Log channel set to {channel.name} for guild {ctx.guild.id}")
 
     async def check_required_role(self, ctx):
         """Check if the user has the required role."""
-        guild_id = str(ctx.guild.id)
+        guild_db = self.get_guild_db(str(ctx.guild.id))
+        guild_configs = guild_db['guild_configurations']
         
         # Fetch guild configuration
-        config = await self.guild_configs.find_one({"guild_id": guild_id})
+        config = await guild_configs.find_one({"config_type": "role_management"})
         
         if not config or 'required_role_id' not in config:
             await ctx.send(embed=discord.Embed(
@@ -216,12 +140,15 @@ class RoleManagementCog(commands.Cog):
             return
         
         guild_id = str(ctx.guild.id)
+        guild_db = self.get_guild_db(guild_id)
+        role_mappings = guild_db['role_mappings']
+        guild_configs = guild_db['guild_configurations']
+        
         member = member or ctx.author
         
-        # Get role mapping
-        mapping = await self.role_mappings.find_one({
-            "guild_id": guild_id, 
-            "custom_name": custom_name
+        # Get role mapping (case-insensitive)
+        mapping = await role_mappings.find_one({
+            "custom_name": custom_name.lower()
         })
         
         if not mapping:
@@ -232,8 +159,8 @@ class RoleManagementCog(commands.Cog):
             return
         
         # Get role configuration
-        config = await self.guild_configs.find_one({"guild_id": guild_id}) or {}
-        role_limit = config.get('role_assignment_limit', 5)
+        config = await guild_configs.find_one({"config_type": "role_management"}) or {}
+        role_limit = config.get('role_assignment_limit', 10)  # Increased default limit
         
         # Get the role object
         role = ctx.guild.get_role(mapping['role_id'])
@@ -253,9 +180,12 @@ class RoleManagementCog(commands.Cog):
             ))
             return
         
-        # Check current custom roles
-        custom_roles = [r for r in member.roles if r.id in 
-                        [m['role_id'] for m in await self.role_mappings.find({"guild_id": guild_id}).to_list(length=None)]]
+        # Find all custom roles for this guild
+        custom_roles = []
+        async for r in role_mappings.find():
+            custom_role = ctx.guild.get_role(r['role_id'])
+            if custom_role and custom_role in member.roles:
+                custom_roles.append(custom_role)
         
         if role in member.roles:
             # Remove role
@@ -275,7 +205,6 @@ class RoleManagementCog(commands.Cog):
             action = "assigned"
         
         # Log channel notification
-        config = await self.guild_configs.find_one({"guild_id": guild_id})
         if config and 'log_channel_id' in config:
             log_channel = ctx.guild.get_channel(config['log_channel_id'])
             if log_channel:
@@ -293,10 +222,11 @@ class RoleManagementCog(commands.Cog):
         """Generate dynamic commands for each custom role when the cog loads."""
         for guild in self.bot.guilds:
             guild_id = str(guild.id)
-            # Find all role mappings for this guild
-            mappings = await self.role_mappings.find({"guild_id": guild_id}).to_list(length=None)
+            guild_db = self.get_guild_db(guild_id)
+            role_mappings = guild_db['role_mappings']
             
-            for mapping in mappings:
+            # Find all role mappings for this guild
+            async for mapping in role_mappings.find():
                 custom_name = mapping['custom_name']
                 
                 # Create a dynamic command if it doesn't already exist
@@ -313,11 +243,9 @@ class RoleManagementCog(commands.Cog):
         """Shows all available role management commands."""
         embed = discord.Embed(title="Role Management Commands", color=self.EMBED_COLOR)
         embed.add_field(name=".setreqrole [role]", value="Set the role required for assigning/removing roles.", inline=False)
-        embed.add_field(name=".setrole [custom_name] [@role]", value="Map a custom name to a role.", inline=False)
+        embed.add_field(name=".setrole [custom_name] [@role]", value="Map a custom name to a role (multiple roles allowed).", inline=False)
         embed.add_field(name=".setlogchannel [channel]", value="Set the log channel for role actions.", inline=False)
-        embed.add_field(name=".reset_all_roles", value="Remove all mapped roles from server members.", inline=False)
         embed.add_field(name=".[custom_name] [@user]", value="Assign/remove the mapped role to/from a user.", inline=False)
-        embed.add_field(name=".set_role_limit [limit]", value="Set maximum number of custom roles per user.", inline=False)
         embed.set_footer(text="Role Management Bot")
         await ctx.send(embed=embed)
 
