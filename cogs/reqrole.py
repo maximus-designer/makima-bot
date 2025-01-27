@@ -3,6 +3,10 @@ import logging
 import os
 import json
 from discord.ext import commands
+from pymongo import MongoClient
+from dotenv import load_dotenv
+
+load_dotenv()  # Load environment variables from .env file
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,7 +22,12 @@ class RoleManagement(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config_dir = 'server_configs'
-        os.makedirs(self.config_dir, exist_ok=True)
+        self.mongo_url = os.getenv('MONGO_URL')  # MongoDB URL from environment variable
+        self.client = MongoClient(self.mongo_url)
+        self.db = self.client['discord_bot']  # Create/Use database
+        self.configs_collection = self.db['server_configs']  # Collection to store server configurations
+
+        # Emojis for reactions
         self.emojis = {
             'success': '<:sukoon_tick:1322894604898664478>',
             'error': '<:sukoon_cross:1322894630684983307>',
@@ -28,37 +37,30 @@ class RoleManagement(commands.Cog):
             'log': '<a:Sukoon_loading:1324070160931356703>'
         }
 
-    def get_config_path(self, guild_id):
-        return os.path.join(self.config_dir, f'{guild_id}.json')
-
-    def load_configs(self, guild_id):
-        """Load server configurations from JSON."""
-        config_path = self.get_config_path(guild_id)
-        try:
-            with open(config_path, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {}
-
-    def save_configs(self, guild_id, config):
-        """Save server configurations to JSON."""
-        config_path = self.get_config_path(guild_id)
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=4)
-
     def get_server_config(self, guild_id):
-        """Get or create server configuration."""
-        config = self.load_configs(guild_id)
+        """Get or create server configuration from MongoDB."""
+        config = self.configs_collection.find_one({'guild_id': guild_id})
+        
         if not config:
             config = {
+                'guild_id': guild_id,
                 'role_mappings': {},
                 'reqrole_id': None,
                 'log_channel_id': None,
                 'role_assignment_limit': 5,
                 'admin_only_commands': True
             }
-            self.save_configs(guild_id, config)
+            self.configs_collection.insert_one(config)  # Insert new configuration if it doesn't exist
+        
         return config
+
+    def save_configs(self, guild_id, config):
+        """Save server configurations to MongoDB."""
+        self.configs_collection.update_one(
+            {'guild_id': guild_id},
+            {'$set': config},
+            upsert=True  # Insert if the document does not exist
+        )
 
     async def log_activity(self, guild, action, details):
         """Log activities to the designated log channel."""
